@@ -2,29 +2,34 @@
   "name": "LeatTrace",
   "version": "1.0.0",
   "description": "Enterprise-grade Blockchain Payment Tracer & AML Compliance Suite",
-  "main": "backend/server.js",
   "type": "module",
   "scripts": {
-    "start": "node backend/server.js",
-    "server": "node backend/server.js",
-    "client": "vite --host",
-    "dev": "concurrently \"npm run server\" \"npm run client\"",
-    "build": "vite build",
-    "preview": "vite preview"
+    "dev":          "concurrently \"npm run server:dev\" \"npm run client\"",
+    "server:dev":   "nodemon --watch backend backend/server.js",
+    "client":       "vite --host",
+    "build":        "vite build",
+    "preview":      "vite preview",
+    "server":       "node backend/server.js",
+    "db:init":      "psql -U postgres -d leatrace -f backend/db/schema.sql"
   },
   "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "helmet": "^7.1.0",
-    "jsonwebtoken": "^9.0.2",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "cors":          "^2.8.5",
+    "dotenv":        "^16.4.5",
+    "express":       "^4.19.2",
+    "helmet":        "^7.1.0",
+    "jsonwebtoken":  "^9.0.2",
+    "node-cron":     "^3.0.3",
+    "node-fetch":    "^3.3.2",
+    "pg":            "^8.11.5",
+    "react":         "^18.3.1",
+    "react-dom":     "^18.3.1"
   },
   "devDependencies": {
-    "@types/react": "^18.3.3",
-    "@types/react-dom": "^18.2.25",
+    "@types/react":         "^18.3.3",
+    "@types/react-dom":     "^18.2.25",
     "@vitejs/plugin-react": "^4.3.0",
-    "concurrently": "^8.2.2",
-    "vite": "^5.2.11"
+    "concurrently":         "^8.2.2",
+    "nodemon":              "^3.1.0",
+    "vite":                 "^5.2.11"
   }
 }
