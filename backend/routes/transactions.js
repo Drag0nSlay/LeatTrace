@@ -25,7 +25,7 @@ const router = express.Router();
 // ── POST /api/ingest ─────────────────────────────────────────────────────────
 // Body: { wallet: string, chain: 'ethereum'|'bitcoin', limit?: number }
 router.post('/ingest', async (req, res) => {
-  const { wallet, chain, limit = 100 } = req.body;
+  const { wallet, chain, limit = 100, resumable = false } = req.body;
 
   if (!wallet || !chain) {
     return res.status(400).json({ error: 'wallet and chain are required' });
@@ -37,7 +37,7 @@ router.post('/ingest', async (req, res) => {
   }
 
   try {
-    const result = await ingestWallet(wallet, chain, { limit: Math.min(limit, 200) });
+    const result = await ingestWallet(wallet, chain, { limit: Math.min(limit, 200), resumable });
     return res.json({
       success: true,
       wallet,

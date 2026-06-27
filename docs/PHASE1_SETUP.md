@@ -229,4 +229,4 @@ Once Phase 1 is stable, Phase 2 adds:
 - Risk scoring engine
 - Wallet tagging from OFAC / scam lists
 
-See `docs/PHASE2_PLAN.md` (coming soon).
+See `docs/PHASE2_SETUP.md` (coming soon).

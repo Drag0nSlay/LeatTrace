@@ -6,7 +6,7 @@
 import fetch from 'node-fetch';
 
 const BASE_URL = 'https://api.etherscan.io/v2/api';
-const CHAIN_ID = '1'; // Ethereum mainnet
+const CHAIN_ID = '1';
 const API_KEY  = process.env.ETHERSCAN_API_KEY || 'YourApiKeyToken';
 
 export async function fetchEthTransactions(address, limit = 100, startBlock = 0) {
@@ -72,6 +72,66 @@ export async function fetchEthBalance(address) {
   const response = await fetch(`${BASE_URL}?${params}`);
   const data     = await response.json();
   if (data.status !== '1') throw new Error(`Etherscan balance error: ${data.message}`);
-
   return (Number(BigInt(data.result)) / 1e18).toFixed(6);
+}
+
+/**
+ * Fetch address label from Etherscan
+ * Returns label like 'Fake_Phishing3348326', 'Tornado Cash' etc. if known
+ */
+export async function fetchEthAddressLabel(address) {
+  try {
+    // Try token info first
+    const tokenParams = new URLSearchParams({
+      chainid:         CHAIN_ID,
+      module:          'token',
+      action:          'tokeninfo',
+      contractaddress: address,
+      apikey:          API_KEY,
+    });
+    const tokenRes  = await fetch(`${BASE_URL}?${tokenParams}`);
+    const tokenData = await tokenRes.json();
+    if (tokenData?.result?.[0]?.tokenName) {
+      return tokenData.result[0].tokenName;
+    }
+
+    // Try account label via contract source
+    const contractParams = new URLSearchParams({
+      chainid:  CHAIN_ID,
+      module:   'contract',
+      action:   'getsourcecode',
+      address,
+      apikey:   API_KEY,
+    });
+    const contractRes  = await fetch(`${BASE_URL}?${contractParams}`);
+    const contractData = await contractRes.json();
+    if (contractData?.result?.[0]?.ContractName) {
+      return contractData.result[0].ContractName;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+export async function fetchEthInternalTransactions(address, limit = 100, startBlock = 0) {
+  const params = new URLSearchParams({
+    chainid:    CHAIN_ID,
+    module:     'account',
+    action:     'txlistinternal',
+    address,
+    startblock: startBlock.toString(),
+    endblock:   '99999999',
+    page:       '1',
+    offset:     limit.toString(),
+    sort:       'desc',
+    apikey:     API_KEY,
+  });
+
+  console.log(`[Etherscan] Fetching ${limit} internal txs for ${address}`);
+  const response = await fetch(`${BASE_URL}?${params}`);
+  if (!response.ok) return [];
+  const data = await response.json();
+  if (data.status !== '1') return [];
+  return data.result;
 }

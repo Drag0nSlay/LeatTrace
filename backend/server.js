@@ -1,7 +1,11 @@
 /**
- * backend/server.js — Phase 1 Complete
- * Includes: PostgreSQL, Live APIs, JWT auth, all legacy routes
- * Fix: Deterministic risk score (same address = same score always)
+ * backend/server.js — Phase 1 + Phase 2 Complete
+ *
+ * Phase 2 adds:
+ *   - Real risk scoring from PostgreSQL transaction data
+ *   - Recursive multi-hop wallet tracing
+ *   - Wallet tagging (OFAC + scam lists)
+ *   - /api/analyze endpoint replaces random score
  */
 
 import express           from 'express';
@@ -12,7 +16,8 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { readFileSync }  from 'fs';
 
-import transactionRoutes  from './routes/transactions.js';
+import transactionRoutes from './routes/transactions.js';
+import analysisRoutes    from './routes/analysis.js';
 import { startScheduler } from './services/scheduler.js';
 import './db/pool.js';
 
@@ -56,40 +61,35 @@ function requireAuth(req, res, next) {
   }
 }
 
-// ── Deterministic Risk Score ──────────────────────────────────────────────────
-// Same address = SAME score always. No randomness.
-function deterministicScore(address) {
-  let hash = 0;
-  const str = address.toLowerCase();
-  for (let i = 0; i < str.length; i++) {
-    hash = ((hash << 5) - hash) + str.charCodeAt(i);
-    hash = hash & hash; // convert to 32-bit int
-  }
-  return Math.abs(hash) % 101; // 0-100
-}
-
-// ── Phase 1: Live blockchain routes ──────────────────────────────────────────
+// ── Phase 1 routes — live ingestion ──────────────────────────────────────────
 app.use('/api', requireAuth, transactionRoutes);
 
-// ── In-memory stores (Phase 3 mein PostgreSQL mein jayega) ───────────────────
-let monitorRules = [];
-let alertLogs    = [];
-let cases        = [];
+// ── Phase 2 routes — real analysis ───────────────────────────────────────────
+app.use('/api', requireAuth, analysisRoutes);
+
+// ── Legacy in-memory routes ───────────────────────────────────────────────────
+let monitorRules = [], alertLogs = [], cases = [];
 let monitorId = 1, alertId = 1, caseId = 1;
 
-// Stats — real tx counts from PostgreSQL
 app.get('/api/stats', requireAuth, async (req, res) => {
   try {
     const { getStats } = await import('./db/txRepository.js');
-    const chainStats = await getStats();
+    const chainStats   = await getStats();
     const vol = { BTC: 0, ETH: 0, SOL: 0, BSC: 0, POL: 0, ADA: 0, AVAX: 0 };
     for (const row of chainStats) {
       if (row.chain === 'ethereum') vol.ETH = parseFloat(row.total_tx) || 0;
       if (row.chain === 'bitcoin')  vol.BTC = parseFloat(row.total_tx) || 0;
     }
+
+    // Count critical-tagged wallets from DB
+    const { default: pool } = await import('./db/pool.js');
+    const flagged = await pool.query(
+      `SELECT COUNT(*) FROM wallet_tags WHERE risk_level IN ('critical','high')`
+    );
+
     res.json({
       totalTracedVolume:       vol,
-      flaggedAddressesCount:   alertLogs.filter(l => l.severity === 'critical').length,
+      flaggedAddressesCount:   parseInt(flagged.rows[0].count) || 0,
       monitoredAddressesCount: monitorRules.length,
       activeAlertTriggered:    alertLogs.length,
       complianceScore:         Math.max(0, 100 - alertLogs.filter(l => l.severity === 'critical').length * 2),
@@ -100,9 +100,8 @@ app.get('/api/stats', requireAuth, async (req, res) => {
   }
 });
 
-// Cases
-app.get('/api/cases',  requireAuth, (req, res) => res.json(cases));
-app.post('/api/cases', requireAuth, (req, res) => {
+app.get('/api/cases',        requireAuth, (req, res) => res.json(cases));
+app.post('/api/cases',       requireAuth, (req, res) => {
   const c = { id: caseId++, ...req.body, createdAt: new Date() };
   cases.push(c);
   res.json(c);
@@ -112,9 +111,8 @@ app.delete('/api/cases/:id', requireAuth, (req, res) => {
   res.json({ success: true });
 });
 
-// Monitor rules
-app.get('/api/monitor/rules',  requireAuth, (req, res) => res.json(monitorRules));
-app.post('/api/monitor/rules', requireAuth, (req, res) => {
+app.get('/api/monitor/rules',        requireAuth, (req, res) => res.json(monitorRules));
+app.post('/api/monitor/rules',       requireAuth, (req, res) => {
   const rule = { id: monitorId++, ...req.body, createdAt: new Date() };
   monitorRules.push(rule);
   res.json(rule);
@@ -124,79 +122,87 @@ app.delete('/api/monitor/rules/:id', requireAuth, (req, res) => {
   res.json({ success: true });
 });
 
-// Alert logs
 app.get('/api/monitor/logs', requireAuth, (req, res) => res.json(alertLogs));
-
-// Simulate block event
 app.post('/api/monitor/simulate', requireAuth, (req, res) => {
   if (monitorRules.length === 0) {
-    return res.json({ triggered: false, message: 'No active monitor addresses. Add a wallet in Realtime Monitoring first.' });
+    return res.json({ triggered: false, message: 'No active monitor addresses.' });
   }
   const rule = monitorRules[Math.floor(Math.random() * monitorRules.length)];
   const log  = {
-    id:        alertId++,
-    chain:     rule.chain,
-    address:   rule.address,
-    severity:  Math.random() > 0.5 ? 'critical' : 'warning',
-    message:   'Simulated suspicious transfer detected',
+    id: alertId++, chain: rule.chain, address: rule.address,
+    severity: Math.random() > 0.5 ? 'critical' : 'warning',
+    message:  'Simulated suspicious transfer detected',
     timestamp: new Date(),
   };
   alertLogs.unshift(log);
   res.json({ triggered: true, log });
 });
 
-// ── Trace address — FIXED: deterministic score ────────────────────────────────
-app.get('/api/trace/address/:chain/:address', requireAuth, (req, res) => {
+// Legacy trace endpoint — now uses real Phase 2 analysis
+app.get('/api/trace/address/:chain/:address', requireAuth, async (req, res) => {
   const { chain, address } = req.params;
+  const chainMap   = { ETH: 'ethereum', BTC: 'bitcoin', ethereum: 'ethereum', bitcoin: 'bitcoin' };
+  const dbChain    = chainMap[chain.toUpperCase()] || chainMap[chain] || 'ethereum';
 
-  // This will ALWAYS return the same score for the same address
-  const riskScore = deterministicScore(address);
+  try {
+    const { getRiskScore }      = await import('./services/scoringService.js');
+    const { traceWallet, getWalletSummary } = await import('./services/tracingService.js');
+    const { getWalletTag }      = await import('./services/taggingService.js');
 
-  const category        = riskScore >= 75 ? 'Critical'    : riskScore >= 40 ? 'Suspicious' : 'Clean';
-  const riskLabel       = riskScore >= 75 ? 'High Risk'   : riskScore >= 40 ? 'Medium Risk' : 'Low Risk';
-  const directExposure  = riskScore >= 75 ? 'Sanctioned entity interaction detected' : 'None detected';
-  const indirectExposure= riskScore >= 40 ? 'Proximity to flagged wallets' : 'None detected';
+    const [riskData, graph, summary, tag] = await Promise.all([
+      getRiskScore(address, dbChain),
+      traceWallet(address, dbChain),
+      getWalletSummary(address, dbChain),
+      getWalletTag(address),
+    ]);
 
-  res.json({
-    address,
-    chain,
-    details: {
-      name:      address.slice(0, 8) + '...',
-      riskScore,
-      type:      riskLabel,
-    },
-    metrics: {
-      riskAnalysis: {
-        category,
-        directExposure,
-        indirectExposure,
+    res.json({
+      address, chain,
+      details: {
+        name:           address.slice(0, 8) + '...',
+        riskScore:      riskData.score,
+        type:           riskData.riskLabel,
+        tag:            tag?.tag || null,
+        tagDescription: tag?.description || null,
       },
-    },
-    graph: {
-      nodes: [{ id: address, label: address.slice(0, 8) + '...', type: 'target', riskScore }],
-      edges: [],
-      links: [],
-    },
-  });
+      metrics: {
+        riskAnalysis: {
+          category:         riskData.category,
+          directExposure:   riskData.signals.find(s => s.signal.includes('OFAC'))?.detail || 'None detected',
+          indirectExposure: riskData.signals.find(s => s.signal.includes('Interacted'))?.detail || 'None detected',
+          signals:          riskData.signals,
+        },
+        txStats: {
+          totalTx:       parseInt(summary?.tx_count)        || 0,
+          totalVolume:   parseFloat(summary?.total_volume)  || 0,
+          totalReceived: parseFloat(summary?.total_received)|| 0,
+          totalSent:     parseFloat(summary?.total_sent)    || 0,
+          firstSeen:     summary?.first_seen  || null,
+          lastSeen:      summary?.last_seen   || null,
+        },
+      },
+      graph,
+    });
+  } catch (err) {
+    console.error('[/api/trace/address]', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// Health check
 app.get('/api/health', (req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));
 
-// ── Serve frontend in production ──────────────────────────────────────────────
 const distPath = join(__dirname, '..', 'dist');
 try {
   readFileSync(join(distPath, 'index.html'));
   app.use(express.static(distPath));
   app.get('*', (_req, res) => res.sendFile(join(distPath, 'index.html')));
-} catch {
-  // Dev mode — Vite serves frontend
-}
+} catch { /* dev mode */ }
 
 app.listen(PORT, () => {
   console.log('===========================================================');
-  console.log(`  LEATrace Phase 1 — http://localhost:${PORT}`);
-  console.log('  Fix: Deterministic risk score active');
+  console.log(`  LEATrace Phase 2 — http://localhost:${PORT}`);
+  console.log('  Real scoring: PostgreSQL tx data + OFAC tags');
+  console.log('  Recursive tracing: WITH RECURSIVE SQL');
   console.log('===========================================================');
   startScheduler();
 });
