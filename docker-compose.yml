@@ -1,0 +1,168 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: leatrace-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: leatrace
+      POSTGRES_USER: leatrace_admin
+      POSTGRES_PASSWORD: SecureDbPass@2026
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leatrace_admin -d leatrace"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: leatrace-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  neo4j:
+    image: neo4j:5-community
+    container_name: leatrace-neo4j
+    restart: always
+    ports:
+      - "7474:7474" # HTTP UI
+      - "7687:7687" # Bolt protocol
+    environment:
+      NEO4J_AUTH: neo4j/SecurePass@2026
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p SecurePass@2026 'RETURN 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8-alpine
+    container_name: leatrace-clickhouse
+    restart: always
+    ports:
+      - "8123:8123" # HTTP REST API
+      - "9000:9000" # Native client port
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:8123/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.10.2
+    container_name: leatrace-elasticsearch
+    restart: always
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - elastic_data:/usr/share/elasticsearch/data
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.10.2
+    container_name: leatrace-logstash
+    restart: always
+    volumes:
+      - ./devops/elk/logstash.conf:/usr/share/logstash/pipeline/logstash.conf
+    ports:
+      - "5044:5044"
+      - "5000:5000"
+    depends_on:
+      - elasticsearch
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.10.2
+    container_name: leatrace-kibana
+    restart: always
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    depends_on:
+      - elasticsearch
+
+  loki:
+    image: grafana/loki:2.9.1
+    container_name: leatrace-loki
+    restart: always
+    volumes:
+      - ./devops/loki/loki-config.yaml:/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+
+  promtail:
+    image: grafana/promtail:2.9.1
+    container_name: leatrace-promtail
+    restart: always
+    volumes:
+      - ./devops/loki/promtail-config.yaml:/etc/promtail/config.yml
+      - /var/log:/var/log
+    depends_on:
+      - loki
+
+  otel-collector:
+    image: otel/opentelemetry-collector:0.85.0
+    container_name: leatrace-otel-collector
+    restart: always
+    volumes:
+      - ./devops/otel/otel-collector.yaml:/etc/otel/config.yaml
+    ports:
+      - "4317:4317" # OTLP gRPC receiver
+      - "4318:4318" # OTLP HTTP receiver
+      - "8889:8889" # Prometheus exporter metrics
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: leatrace-backend
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://leatrace_admin:SecureDbPass@2026@postgres:5432/leatrace
+      - REDIS_URL=redis://redis:6379/0
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_PASSWORD=SecurePass@2026
+      - CLICKHOUSE_HOST=clickhouse
+      - ETH_RPC_URL=https://cloudflare-eth.com
+    volumes:
+      - ./backend:/app
+
+volumes:
+  postgres_data:
+  redis_data:
+  neo4j_data:
+  neo4j_logs:
+  clickhouse_data:
+  elastic_data:

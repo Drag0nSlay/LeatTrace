@@ -1,0 +1,45 @@
+{{- if .Values.elasticsearch.enabled -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "leatrace.fullname" . }}-elasticsearch
+  labels:
+    app: {{ include "leatrace.name" . }}-elasticsearch
+spec:
+  serviceName: {{ include "leatrace.fullname" . }}-elasticsearch-hl
+  replicas: {{ .Values.elasticsearch.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ include "leatrace.name" . }}-elasticsearch
+  template:
+    metadata:
+      labels:
+        app: {{ include "leatrace.name" . }}-elasticsearch
+    spec:
+      containers:
+        - name: elasticsearch
+          image: "{{ .Values.elasticsearch.image.repository }}:{{ .Values.elasticsearch.image.tag }}"
+          ports:
+            - containerPort: 9200
+              name: http
+            - containerPort: 9300
+              name: transport
+          resources:
+            {{- toYaml .Values.elasticsearch.resources | nindent 12 }}
+          env:
+            - name: discovery.type
+              value: "single-node"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "leatrace.fullname" . }}-elasticsearch
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.elasticsearch.service.port }}
+      targetPort: http
+      name: http
+  selector:
+    app: {{ include "leatrace.name" . }}-elasticsearch
+{{- end }}
