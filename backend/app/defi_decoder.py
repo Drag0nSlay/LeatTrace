@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional, List
 from .protocol_registry import protocol_registry
 from .pool_analyzer import pool_analyzer
 from .contract_decoder import contract_decoder
+from .price_oracle import price_oracle
 
 # ERC Standard Event Topics
 ERC20_TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -38,7 +39,7 @@ DEFI_METHODS = {
     "0xe2bbb158": {"name": "deposit (staking)", "action": "Stake / Farm Deposit", "category": "staking"},
     "0x441a3e70": {"name": "withdraw (staking)", "action": "Unstake / Farm Withdraw", "category": "staking"},
     "0xb6b55f25": {"name": "deposit (vault)", "action": "Vault Deposit", "category": "vault"},
-    "0x2e1a7d4d": {"name": "withdraw (vault)", "action": "Vault Withdraw", "category": "vault"},
+    # Note: 0x2e1a7d4d already mapped to "withdraw" above (lines 34). Vault withdraw shares the same selector.
     "0xe9fad8ee": {"name": "exit", "action": "Exit Position", "category": "staking"},
     "0x3d18b912": {"name": "getReward", "action": "Claim Rewards", "category": "reward"},
     "0xab033ea9": {"name": "setDelegate", "action": "Governance Delegate", "category": "governance"},
@@ -87,7 +88,7 @@ class DeFiDecoderService:
             "method_name": method_info.get("name", decoded_input["method_name"]),
             "decoded": decoded_input,
             "value_eth": value_eth,
-            "value_usd": value_eth * 3500.0,
+            "value_usd": price_oracle.convert_to_usd(value_eth, "ETH"),
             "is_flash_loan": False,
         }
 
@@ -186,7 +187,7 @@ class DeFiDecoderService:
         return {
             "is_flash_loan": is_flash,
             "method": method.get("name", "unknown"),
-            "estimated_loan_value_usd": value_eth * 3500.0 if is_flash else 0,
+            "estimated_loan_value_usd": price_oracle.convert_to_usd(value_eth, "ETH") if is_flash else 0,
             "risk_level": "high" if is_flash else "none",
         }
 

@@ -68,8 +68,9 @@ KNOWN_BRIDGES = {
         "risk_level": "medium",
         "avg_delay_minutes": 5,
     },
-    "0x2b3ce4b5b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2": {
-        "name": "Across Protocol Bridge",
+    # Across Protocol Bridge: verified address on Ethereum mainnet
+    "0x5c7bcd6e7de5423a257d81b442095a1a6ced35c5": {
+        "name": "Across Protocol SpokePool",
         "target_chain": "multi",
         "source_chain": "ethereum",
         "protocol": "Across",

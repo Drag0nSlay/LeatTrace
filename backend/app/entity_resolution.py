@@ -30,15 +30,14 @@ KNOWN_ENTITIES = {
     "0x12d66f87a04a9e220743712ce6d9bb1b5616b8fc": {"entity_name": "Tornado.Cash 0.1 ETH", "category": "mixer", "subcategory": "privacy_pool", "confidence": 0.99, "chain": "ethereum"},
     "0x47ce0dbc5425fd3e2002a290749d5f6e9f6f8594": {"entity_name": "Tornado.Cash 1 ETH", "category": "mixer", "subcategory": "privacy_pool", "confidence": 0.99, "chain": "ethereum"},
     "0x91054378296ec657a4077c16c85a4cf13e8f8f8f": {"entity_name": "Tornado.Cash 10 ETH", "category": "mixer", "subcategory": "privacy_pool", "confidence": 0.99, "chain": "ethereum"},
-    "0xd4b88df96a2b3c4d5e6f7a8b9c0d1e2f3a4b568a": {"entity_name": "Tornado.Cash 100 ETH", "category": "mixer", "subcategory": "privacy_pool", "confidence": 0.99, "chain": "ethereum"},
+    "0xa160cdab225685da1d56aa342ad8841c3b53f291": {"entity_name": "Tornado.Cash 100 ETH", "category": "mixer", "subcategory": "privacy_pool", "confidence": 0.99, "chain": "ethereum"},
     "0x71c20e241775e5332f143715df332f143789a71b": {"entity_name": "Tornado.Cash Router", "category": "mixer", "subcategory": "router", "confidence": 0.99, "chain": "ethereum"},
     # Bridges
     "0xa0c68c638235ee32657e8f720a23cec1bfc77c77": {"entity_name": "Polygon PoS Bridge", "category": "bridge", "subcategory": "l1_bridge", "confidence": 0.99, "chain": "ethereum"},
     "0xcee284f754e854890e311e3280b767f80797180d": {"entity_name": "Arbitrum L1 Gateway", "category": "bridge", "subcategory": "l1_bridge", "confidence": 0.99, "chain": "ethereum"},
     "0x99c9fc46f90e8a1c45c1113857e30d87a20c38c2": {"entity_name": "Optimism Standard Bridge", "category": "bridge", "subcategory": "l1_bridge", "confidence": 0.99, "chain": "ethereum"},
-    # Sanctioned
-    "0x9012345678901234567890123456789012345678": {"entity_name": "Tornado.Cash 100 ETH Pool", "category": "sanctioned", "subcategory": "ofac", "confidence": 0.99, "chain": "ethereum"},
-    "0x0987654321098765432109876543210987654321": {"entity_name": "Lazarus Group Hack Wallet", "category": "sanctioned", "subcategory": "ofac", "confidence": 0.99, "chain": "ethereum"},
+    # NOTE: Sanctioned entities are resolved exclusively via the sanctions database
+    # (sanctions_screening_engine). No hardcoded sanctioned addresses belong here.
 }
 
 

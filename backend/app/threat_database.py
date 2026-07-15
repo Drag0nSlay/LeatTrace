@@ -2,18 +2,15 @@
 LEATrace Threat Intelligence Database — Production.
 
 Queries sanctions entries from the database rather than a hardcoded dict.
-Replaces the 2-entry in-memory SANCTION_FEEDS dict.
-
-PRODUCTION INVARIANTS:
-- No hardcoded entries.
-- All data comes from the sanctions_entries DB table (populated by feed_scheduler).
-- Returns None if address not found — never fabricates.
 """
 
 from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
+
+from .sanctions_screening_engine import sanctions_screening_engine
+from . import models
 
 logger = logging.getLogger("leatrace.threat_database")
 
@@ -30,7 +27,8 @@ class ThreatIntelligenceDatabase:
 
     def check_sanction(self, address: str, db: Any = None) -> Optional[Dict[str, Any]]:
         """
-        Checks if a crypto address appears in the sanctions_entries table.
+        Checks if a crypto address appears in the sanctions_list_wallets table
+        or the legacy sanctions_entries table.
 
         Args:
             address: Crypto wallet address to check
@@ -51,9 +49,29 @@ class ThreatIntelligenceDatabase:
             return None
 
         try:
-            from . import models
-            addr_lower = address.strip().lower()
+            # 1. Screen wallet address using the new unified screening engine
+            res = sanctions_screening_engine.screen_wallet(
+                address=address,
+                db=db,
+                checked_by="threat_db",
+                reason_context="Unified threat database query",
+            )
+            
+            if res.get("sanctioned") and res.get("matched_entity"):
+                ent = res["matched_entity"]
+                return {
+                    "address":     address,
+                    "owner":       ent["name"],
+                    "registry":    ent["provider_id"].upper(),
+                    "program":     ent["program"],
+                    "source_id":   ent["entity_uid"],
+                    "entry_type":  ent["entity_type"],
+                    "severity":    "Critical",
+                    "data_source": "database",
+                }
 
+            # 2. Fallback to legacy table if the new tables are empty
+            addr_lower = address.strip().lower()
             entry = (
                 db.query(models.SanctionsEntry)
                 .filter(models.SanctionsEntry.address == addr_lower)
@@ -68,7 +86,7 @@ class ThreatIntelligenceDatabase:
                     "source_id":   entry.source_id,
                     "entry_type":  entry.entry_type,
                     "severity":    "Critical",
-                    "data_source": "database",
+                    "data_source": "database_legacy",
                 }
             return None
 
@@ -91,9 +109,6 @@ class ThreatIntelligenceDatabase:
             return None
 
         try:
-            from . import models
-            from ..stix_engine import stix_engine
-
             # Search pattern field for the address
             indicators = (
                 db.query(models.StixIndicator)
@@ -142,7 +157,38 @@ class ThreatIntelligenceDatabase:
             return {"status": "error", "message": "DB session required"}
 
         try:
-            from . import models
+            # Use the new normalized model if available
+            from .sanctions_models import SanctionsListEntity, SanctionsListWallet
+            
+            # Check if new normalized table is populated
+            if db.query(SanctionsListWallet).count() > 0:
+                query = db.query(SanctionsListWallet).join(SanctionsListEntity)
+                if list_type:
+                    query = query.filter(SanctionsListEntity.provider_id == list_type.lower())
+                
+                total = query.count()
+                items = query.offset(skip).limit(min(limit, 500)).all()
+
+                return {
+                    "total": total,
+                    "skip": skip,
+                    "limit": limit,
+                    "entries": [
+                        {
+                            "id":          e.id,
+                            "address":     e.address,
+                            "entity_name": e.entity.name,
+                            "program":     e.entity.program,
+                            "list_type":   e.entity.provider_id.upper(),
+                            "entry_type":  e.entity.entity_type,
+                            "source_id":   e.entity.entity_uid,
+                        }
+                        for e in items
+                    ],
+                    "data_source": "database_normalized",
+                }
+
+            # Otherwise, fallback to the legacy model
             query = db.query(models.SanctionsEntry)
             if list_type:
                 query = query.filter(models.SanctionsEntry.list_type == list_type)
@@ -168,7 +214,7 @@ class ThreatIntelligenceDatabase:
                     }
                     for e in items
                 ],
-                "data_source": "database",
+                "data_source": "database_legacy",
             }
         except Exception as e:
             logger.error("Sanctions list failed: %s", e)

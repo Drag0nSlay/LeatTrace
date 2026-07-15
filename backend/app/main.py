@@ -26,6 +26,8 @@ async def lifespan(app: FastAPI):
 
     # Import stix_models so all STIX/IOC/TI tables are registered with Base
     from . import stix_models  # noqa: F401
+    # Import sanctions_models so all sanctions tables are registered with Base
+    from . import sanctions_models  # noqa: F401
 
     # Create DB tables (checkfirst=True prevents duplicate-table errors on reimport)
     Base.metadata.create_all(bind=engine, checkfirst=True)
@@ -59,7 +61,17 @@ async def lifespan(app: FastAPI):
         from .indexer import run_multi_chain_indexer
         asyncio.create_task(run_multi_chain_indexer())
 
+        # Start sanctions background scheduler
+        from .sanctions_scheduler import sanctions_scheduler
+        await sanctions_scheduler.start()
+        logger.info("Sanctions background scheduler started")
+
     yield  # Application runs here
+
+    # Shutdown: stop sanctions scheduler
+    if BACKGROUND_TASKS_ENABLED:
+        from .sanctions_scheduler import sanctions_scheduler
+        await sanctions_scheduler.stop()
 
     # Shutdown: close connection pools
     logger.info("Application shutting down. Closing connections...")

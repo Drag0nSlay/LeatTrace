@@ -1,4 +1,6 @@
 from typing import Dict, Any
+from .price_oracle import price_oracle
+
 
 class DeFiPoolAnalyzer:
     def analyze_pool_interaction(self, input_data: str, value_eth: float) -> Dict[str, Any]:
@@ -19,7 +21,8 @@ class DeFiPoolAnalyzer:
         return {
             "method_selector": method_sig,
             "resolved_action": action,
-            "estimated_value_usd": value_eth * 3500.0
+            "estimated_value_usd": price_oracle.convert_to_usd(value_eth, "ETH"),
         }
 
 pool_analyzer = DeFiPoolAnalyzer()
+

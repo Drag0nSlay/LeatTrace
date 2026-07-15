@@ -1,180 +1,142 @@
 """
-LEATrace Sanctions Provider — Abstract Interface & OFAC SDN Implementation.
+LEATrace Sanctions Provider Facade — Production.
 
-Abstract interface for sanctions data providers, plus a production
-implementation that parses the publicly available OFAC SDN list
-from the U.S. Treasury (treasury.gov).
-
-PRODUCTION INVARIANTS:
-- Uses real OFAC SDN data (publicly available, no API key required).
-- No fabricated sanctions entries.
-- Exact-match lookups only.
+Provides a backward-compatible facade to the DB-backed Sanctions Screening Engine.
+This replaces the legacy in-memory OFAC parser and guarantees that all screening
+calls project onto the consolidated database dataset.
 """
 
-import os
+from __future__ import annotations
+
 import logging
-import xml.etree.ElementTree as ET
-from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 
-from ..connection_pool import connection_pool
+from ..database import SessionLocal
+from ..sanctions_models import SanctionsListWallet, SanctionsListEntity, SanctionsVersionHistory
+from ..sanctions_screening_engine import sanctions_screening_engine
 
-logger = logging.getLogger("leatrace.providers.sanctions")
+logger = logging.getLogger("leatrace.providers.facade")
 
 
-class SanctionsProvider(ABC):
-    """Abstract interface for sanctions data providers."""
+class SanctionsProviderFacade:
+    """Facade for the sanctions screening engine to match the legacy ofac_provider interface."""
 
-    @abstractmethod
     def is_sanctioned(self, address: str) -> bool:
-        """Checks if an address is on a sanctions list."""
-        ...
-
-    @abstractmethod
-    def get_sanction_details(self, address: str) -> Optional[Dict[str, Any]]:
-        """Returns sanction details for an address, or None."""
-        ...
-
-    @abstractmethod
-    def search(self, query: str) -> List[Dict[str, Any]]:
-        """Searches sanctions data by name, alias, or address."""
-        ...
-
-    @abstractmethod
-    def get_all_addresses(self) -> List[str]:
-        """Returns all sanctioned cryptocurrency addresses."""
-        ...
-
-
-class OFACSanctionsProvider(SanctionsProvider):
-    """
-    OFAC SDN (Specially Designated Nationals) provider.
-
-    Downloads and parses the OFAC SDN list from the U.S. Treasury.
-    The SDN XML list is publicly available at no cost.
-    Cryptocurrency addresses are extracted from the 'Digital Currency Address' features.
-    """
-
-    # OFAC SDN XML download URL (public, no auth required)
-    SDN_XML_URL = "https://www.treasury.gov/ofac/downloads/sdn.xml"
-    SDN_ADVANCED_URL = "https://www.treasury.gov/ofac/downloads/sanctions/1.0/sdn_advanced.xml"
-
-    def __init__(self, cache_dir: Optional[str] = None):
-        self._addresses: Dict[str, Dict[str, Any]] = {}
-        self._entities: Dict[str, Dict[str, Any]] = {}
-        self._loaded = False
-        self._cache_dir = cache_dir or os.getenv("OFAC_CACHE_DIR", "")
-
-    def load(self) -> bool:
-        """
-        Downloads and parses the OFAC SDN list.
-        Extracts all cryptocurrency addresses from the 'Digital Currency Address' features.
-        Returns True if successful.
-        """
+        """Checks if a crypto wallet address is on any active sanctions list."""
+        if not address:
+            return False
+        db = SessionLocal()
         try:
-            logger.info("Downloading OFAC SDN list from treasury.gov...")
-            response = connection_pool.get_json(self.SDN_XML_URL, timeout=30)
-            if response and "text" in response:
-                xml_content = response["text"]
-                return self._parse_sdn_xml(xml_content)
-            else:
-                logger.warning("Failed to download OFAC SDN list. Sanctions checks unavailable.")
-                return False
+            res = sanctions_screening_engine.screen_wallet(address, db=db, checked_by="facade")
+            return res.get("sanctioned", False)
         except Exception as e:
-            logger.error(f"OFAC SDN download failed: {e}")
+            logger.error("Facade is_sanctioned failed: %s", e)
             return False
-
-    def _parse_sdn_xml(self, xml_content: str) -> bool:
-        """Parses the SDN XML and extracts cryptocurrency addresses."""
-        try:
-            root = ET.fromstring(xml_content)
-            ns = {"sdn": "http://www.treasury.gov/ofac/downloads/sdn"}
-
-            count = 0
-            for entry in root.findall(".//sdn:sdnEntry", ns):
-                uid = entry.findtext("sdn:uid", "", ns)
-                first_name = entry.findtext("sdn:firstName", "", ns)
-                last_name = entry.findtext("sdn:lastName", "", ns)
-                entity_name = f"{first_name} {last_name}".strip() or uid
-                sdn_type = entry.findtext("sdn:sdnType", "", ns)
-
-                # Extract programs (sanctions lists)
-                programs = []
-                for prog in entry.findall(".//sdn:program", ns):
-                    if prog.text:
-                        programs.append(prog.text)
-
-                # Look for digital currency addresses in ID list
-                for id_elem in entry.findall(".//sdn:id", ns):
-                    id_type = id_elem.findtext("sdn:idType", "", ns)
-                    if "Digital Currency Address" in id_type:
-                        address = id_elem.findtext("sdn:idNumber", "", ns)
-                        if address:
-                            addr_lower = address.lower().strip()
-                            self._addresses[addr_lower] = {
-                                "entity": entity_name,
-                                "uid": uid,
-                                "list": "OFAC SDN",
-                                "programs": programs,
-                                "type": sdn_type,
-                                "risk": "Critical",
-                                "currency": id_type.replace("Digital Currency Address - ", ""),
-                            }
-                            count += 1
-
-                # Store entity info
-                self._entities[uid] = {
-                    "name": entity_name,
-                    "type": sdn_type,
-                    "programs": programs,
-                }
-
-            self._loaded = True
-            logger.info(f"OFAC SDN loaded: {count} cryptocurrency addresses from {len(self._entities)} entities")
-            return True
-        except ET.ParseError as e:
-            logger.error(f"Failed to parse OFAC SDN XML: {e}")
-            return False
-
-    def is_sanctioned(self, address: str) -> bool:
-        """Exact-match check against OFAC SDN cryptocurrency addresses."""
-        if not self._loaded:
-            return False
-        return address.lower().strip() in self._addresses
+        finally:
+            db.close()
 
     def get_sanction_details(self, address: str) -> Optional[Dict[str, Any]]:
-        """Returns OFAC sanction details for an address."""
-        if not self._loaded:
+        """Returns details of a sanctioned wallet address from the database."""
+        if not address:
             return None
-        return self._addresses.get(address.lower().strip())
+        db = SessionLocal()
+        try:
+            res = sanctions_screening_engine.screen_wallet(address, db=db, checked_by="facade")
+            if res.get("sanctioned"):
+                entity = res.get("matched_entity")
+                if entity:
+                    # Map to the format expected by the frontend / legacy callers
+                    return {
+                        "entity": entity["name"],
+                        "uid": entity["entity_uid"],
+                        "list": entity["provider_id"].upper(),
+                        "programs": entity["program"].split(";") if entity["program"] else [],
+                        "type": entity["entity_type"].capitalize(),
+                        "risk": "Critical",
+                        "currency": entity.get("currency", "Cryptocurrency"),
+                    }
+            return None
+        except Exception as e:
+            logger.error("Facade get_sanction_details failed: %s", e)
+            return None
+        finally:
+            db.close()
 
     def search(self, query: str) -> List[Dict[str, Any]]:
-        """Searches OFAC SDN by entity name or address."""
-        if not self._loaded:
+        """Searches sanctions entries by name (fuzzy matching)."""
+        if not query:
             return []
-        query_lower = query.lower()
-        results = []
+        db = SessionLocal()
+        try:
+            # If query looks like an address, screen as address
+            if len(query) >= 26 and (query.startswith("0x") or query.startswith("1") or query.startswith("3") or query.startswith("bc1")):
+                res = sanctions_screening_engine.screen_wallet(query, db=db, checked_by="facade")
+                if res.get("sanctioned") and res.get("matched_entity"):
+                    ent = res["matched_entity"]
+                    return [{
+                        "address": query,
+                        "entity": ent["name"],
+                        "uid": ent["entity_uid"],
+                        "list": ent["provider_id"].upper(),
+                        "programs": ent["program"].split(";") if ent["program"] else [],
+                        "type": ent["entity_type"].capitalize(),
+                        "risk": "Critical",
+                        "currency": ent.get("currency", "Cryptocurrency"),
+                    }]
+                return []
 
-        # Search addresses
-        for addr, details in self._addresses.items():
-            if query_lower in addr or query_lower in details.get("entity", "").lower():
-                results.append({"address": addr, **details})
-
-        return results[:50]  # Limit results
-
-    def get_all_addresses(self) -> List[str]:
-        """Returns all OFAC-sanctioned cryptocurrency addresses."""
-        return list(self._addresses.keys())
+            # Otherwise screen as entity name
+            res = sanctions_screening_engine.screen_entity_name(query, db=db, min_confidence=0.7, checked_by="facade")
+            legacy_results = []
+            for match in res.get("matches", []):
+                for wallet in match.get("wallets", []):
+                    legacy_results.append({
+                        "address": wallet["address"],
+                        "entity": match["name"],
+                        "uid": match["entity_uid"],
+                        "list": match["provider_id"].upper(),
+                        "programs": match["program"].split(";") if match["program"] else [],
+                        "type": match["entity_type"].capitalize(),
+                        "risk": "Critical",
+                        "currency": wallet["currency"],
+                    })
+            return legacy_results
+        except Exception as e:
+            logger.error("Facade search failed: %s", e)
+            return []
+        finally:
+            db.close()
 
     def get_stats(self) -> Dict[str, Any]:
-        """Returns OFAC SDN loading statistics."""
-        return {
-            "loaded": self._loaded,
-            "total_addresses": len(self._addresses),
-            "total_entities": len(self._entities),
-            "source": "OFAC SDN (treasury.gov)",
-        }
+        """Returns statistics of the active database entries."""
+        db = SessionLocal()
+        try:
+            total_addresses = db.query(SanctionsListWallet).filter(SanctionsListWallet.status == "active").count()
+            total_entities = db.query(SanctionsListEntity).filter(SanctionsListEntity.status == "active").count()
+            last_version = (
+                db.query(SanctionsVersionHistory)
+                .filter(SanctionsVersionHistory.status == "success")
+                .order_by(SanctionsVersionHistory.synced_at.desc())
+                .first()
+            )
+            return {
+                "loaded": total_entities > 0,
+                "total_addresses": total_addresses,
+                "total_entities": total_entities,
+                "last_sync": last_version.synced_at.isoformat() if last_version else None,
+                "source": "Consolidated Database (OFAC/EU)",
+            }
+        except Exception as e:
+            logger.error("Facade get_stats failed: %s", e)
+            return {
+                "loaded": False,
+                "total_addresses": 0,
+                "total_entities": 0,
+                "error": str(e),
+            }
+        finally:
+            db.close()
 
 
-# Singleton
-ofac_provider = OFACSanctionsProvider()
+# Singleton Facade
+ofac_provider = SanctionsProviderFacade()

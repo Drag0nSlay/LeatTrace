@@ -437,17 +437,48 @@ class BlockchainService:
     def get_threat_intelligence(self, address: str) -> Dict[str, Any]:
         """
         Resolves threat intelligence for an address.
-        Uses database labels and known sanctioned addresses (exact match only).
+
+        Priority:
+        1. Sanctions Screening Engine (normalized DB — OFAC, EU, UN)
+        2. Database entity labels
+        3. Known entity resolution (exchanges, DeFi, bridges, mixers)
+
         No prefix-based matching. No pattern-based fabrication.
         """
         addr_clean = address.strip()
         addr_lower = addr_clean.lower()
 
-        # 1. Check database labels first
+        # 1. Check sanctions screening engine (normalized database)
         from .database import SessionLocal
-        from . import models
+        from .sanctions_screening_engine import sanctions_screening_engine
         db = SessionLocal()
         try:
+            screen_result = sanctions_screening_engine.screen_wallet(
+                addr_lower, db, checked_by="blockchain_service",
+                reason_context="automated_threat_intelligence",
+            )
+            if screen_result.get("matched"):
+                return {
+                    "is_sanctioned": True,
+                    "details": {
+                        "entity": screen_result.get("entity_name", "Sanctioned Entity"),
+                        "list": screen_result.get("provider_id", "sanctions_db"),
+                        "risk": "Critical",
+                        "actor": screen_result.get("entity_name", "Sanctioned Entity"),
+                        "programs": screen_result.get("programs"),
+                        "match_score": screen_result.get("match_score", 1.0),
+                        "screening_source": "sanctions_intelligence_platform",
+                    },
+                }
+        except Exception as e:
+            logger.debug("Sanctions screening check error (non-fatal): %s", e)
+        finally:
+            db.close()
+
+        # 2. Check database labels
+        db = SessionLocal()
+        try:
+            from . import models
             db_label = db.query(models.EntityLabel).filter(models.EntityLabel.address == addr_lower).first()
             if db_label:
                 return {
@@ -464,7 +495,7 @@ class BlockchainService:
         finally:
             db.close()
 
-        # 2. Check known sanctioned addresses (exact match only)
+        # 3. Check known entity resolution (exchanges, DeFi, bridges, mixers)
         from .entity_resolution import entity_resolution
         entity = entity_resolution.resolve_entity(addr_lower)
         if entity:
@@ -479,7 +510,7 @@ class BlockchainService:
                 },
             }
 
-        # 3. No match — return clean status
+        # 4. No match — return clean status
         return {
             "is_sanctioned": False,
             "details": {"entity": "Unknown", "list": "None", "risk": "None", "actor": "None"},

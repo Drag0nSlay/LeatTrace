@@ -11,6 +11,7 @@ from .obfuscation_score import obfuscation_scorer
 from .risk_engine import risk_engine
 from .laundering_engine import laundering_engine
 from .entity_resolution import entity_resolution
+from .price_oracle import price_oracle
 
 # Known mixer/privacy pool contracts
 MIXER_POOLS = {
@@ -18,7 +19,7 @@ MIXER_POOLS = {
     "0x12d66f87a04a9e220743712ce6d9bb1b5616b8fc": {"name": "Tornado.Cash 0.1 ETH", "protocol": "tornado", "denomination": 0.1},
     "0x47ce0dbc5425fd3e2002a290749d5f6e9f6f8594": {"name": "Tornado.Cash 1 ETH", "protocol": "tornado", "denomination": 1.0},
     "0x91054378296ec657a4077c16c85a4cf13e8f8f8f": {"name": "Tornado.Cash 10 ETH", "protocol": "tornado", "denomination": 10.0},
-    "0xd4b88df96a2b3c4d5e6f7a8b9c0d1e2f3a4b568a": {"name": "Tornado.Cash 100 ETH", "protocol": "tornado", "denomination": 100.0},
+    "0xa160cdab225685da1d56aa342ad8841c3b53f291": {"name": "Tornado.Cash 100 ETH", "protocol": "tornado", "denomination": 100.0},
     "0x71c20e241775e5332f143715df332f143789a71b": {"name": "Tornado.Cash Router", "protocol": "tornado", "denomination": 0},
     # Railgun Privacy
     "0xfa7093cdd9ee6932b4eb2c9e1cde7ce00b1fa4b9": {"name": "Railgun Relay Adapt", "protocol": "railgun", "denomination": 0},
@@ -92,7 +93,7 @@ class MixerDetectorService:
             "mixer_exposure_risk_score": round(risk_score, 1),
             "confidence": round(confidence, 2),
             "total_mixed_value_eth": round(mixed_volume, 6),
-            "total_mixed_value_usd": round(mixed_volume * 3500.0, 2),
+            "total_mixed_value_usd": price_oracle.convert_to_usd(mixed_volume, "ETH"),
             "patterns_detected": {
                 "mixer_deposits": len(mixer_txs) > 0,
                 "smurfing": smurfing["is_smurfing"],
