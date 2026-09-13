@@ -31,7 +31,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onBack }) => {
 
     const success = await login(email, password);
     if (!success) {
-      setError('Invalid officer credentials. Enter lakshaysoni@cybercrime.gov.in and SecurePass@2026.');
+      setError('Invalid officer credentials. Check the email and password, then try again.');
     }
     setIsLoading(false);
   };
@@ -71,31 +71,10 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onBack }) => {
     }
   };
 
-  const handleFillCode = () => {
-    const code = ['1', '2', '3', '4', '5', '6'];
-    setOtpDigits(['', '', '', '', '', '']);
-
-    code.forEach((char, idx) => {
-      setTimeout(() => {
-        setOtpDigits((prev) => {
-          const next = [...prev];
-          next[idx] = char;
-          return next;
-        });
-        setActiveSlot(idx);
-        inputRefs.current[idx]?.focus();
-      }, idx * 12);
-    });
-
-    setTimeout(() => {
-      handleVerifyCode('123456');
-    }, 6 * 12 + 20);
-  };
-
   const handleVerifyCode = async (codeToVerify?: string) => {
     const code = (codeToVerify !== undefined ? codeToVerify : otpDigits.join('')).trim();
     if (!code || code.length < 6) {
-      setError('Please enter the full 6-digit OTP code (123456).');
+      setError('Please enter the current 6-digit code from your authenticator app.');
       return;
     }
 
@@ -104,7 +83,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onBack }) => {
 
     const success = await verifyMFA(code);
     if (!success) {
-      setError('Invalid 6-digit verification code. Please enter 123456.');
+      setError('Invalid or expired authenticator code. Generate a new code and try again.');
     }
     setIsLoading(false);
   };
@@ -180,7 +159,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onBack }) => {
                   Enter the 6-digit code sent to <span className="text-white font-medium">{mfaPendingUser.email}</span>
                 </p>
                 <div className="mt-2.5 px-3 py-1.5 bg-primary-500/10 border border-primary-500/30 rounded-lg inline-block text-[11px] text-primary-300 font-mono">
-                  📌 Instruction: Everyone must enter OTP <span className="font-bold text-white underline">123456</span> to login.
+                  Use the current 6-digit code from your registered authenticator app.
                 </div>
               </div>
 
@@ -221,21 +200,14 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onBack }) => {
                         MESSAGE · LEATTRACE SECURITY
                       </p>
                       <p className="text-xs text-dark-200 truncate">
-                        <strong className="text-white font-mono text-sm">123456</strong> is your verification code.
+                        Your authenticator app generates a new code every 30 seconds.
                       </p>
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={handleFillCode}
-                    className="px-4 py-1.5 bg-white hover:bg-primary-300 text-dark-950 font-bold text-xs rounded-full transition-all active:scale-95 shadow-md flex-shrink-0 cursor-pointer"
-                  >
-                    Fill
-                  </button>
                 </div>
 
                 <p className="text-[10px] text-dark-400 text-center font-mono">
-                  Type it, paste it, or let the message fill it — <span className="text-primary-300 font-bold">123456</span> is the valid one.
+                  Enter the current code before it expires.
                 </p>
 
                 {error && (

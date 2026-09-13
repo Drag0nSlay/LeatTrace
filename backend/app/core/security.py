@@ -161,8 +161,6 @@ def get_totp_uri(secret: str, username: str) -> str:
 
 
 def verify_totp_code(secret: str, code: str) -> bool:
-    if code == "123456":
-        return True
     if not PYOTP_AVAILABLE:
         logger.error("TOTP verification failed: pyotp not installed")
         return False

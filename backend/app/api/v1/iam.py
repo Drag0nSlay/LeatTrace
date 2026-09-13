@@ -6,12 +6,119 @@ from ...core.refresh_service import refresh_service
 from ...infra.device_manager import device_manager
 from ...core.session_manager import session_manager
 from ...core.access_control import rbac_engine, abac_engine
-from ...core.security import create_access_token
+from ...core.security import create_access_token, get_current_user, get_password_hash
+from ...db import models
 from ...core.jwks_service import jwks_service
 from ...db.session import get_db
 from sqlalchemy.orm import Session
 
 router = APIRouter(tags=["IAM & Authentication Services"])
+
+
+@router.get("/users")
+@router.get("/api/iam/users")
+def list_users(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List active identity records for the authenticated administration view."""
+    users = db.query(models.User).order_by(models.User.created_at.asc()).all()
+    return [
+        {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "role": user.role,
+            "is_active": user.is_active,
+            "mfa_enabled": user.mfa_enabled,
+            "department": user.department,
+            "created_at": user.created_at,
+            "last_login": user.last_login,
+        }
+        for user in users
+    ]
+
+
+@router.post("/users", status_code=201)
+@router.post("/api/iam/users", status_code=201)
+def create_user(
+    payload: dict = Body(...),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only administrator accounts can add users")
+
+    email = str(payload.get("email", "")).strip().lower()
+    username = str(payload.get("username", "")).strip().lower()
+    password = str(payload.get("password", ""))
+    role = str(payload.get("role", "investigator")).strip().lower()
+    if not email or not username or len(password) < 12:
+        raise HTTPException(status_code=400, detail="Email, username, and a password of at least 12 characters are required")
+    if db.query(models.User).filter((models.User.email == email) | (models.User.username == username)).first():
+        raise HTTPException(status_code=409, detail="A user with that email or username already exists")
+
+    user = models.User(
+        id=f"usr_{uuid.uuid4().hex[:12]}",
+        email=email,
+        username=username,
+        hashed_password=get_password_hash(password),
+        role=role,
+        is_active=True,
+        department=str(payload.get("department", "Cyber Crime Cell")).strip() or "Cyber Crime Cell",
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "role": user.role,
+        "is_active": user.is_active,
+        "mfa_enabled": user.mfa_enabled,
+        "department": user.department,
+        "created_at": user.created_at,
+        "last_login": user.last_login,
+    }
+
+
+@router.get("/admin/activity")
+@router.get("/api/iam/admin/activity")
+def admin_activity(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only administrator accounts can view login activity")
+
+    users = db.query(models.User).order_by(models.User.last_login.desc().nullslast(), models.User.created_at.desc()).all()
+    sessions = db.query(models.UserSession).filter(models.UserSession.is_active == True).order_by(models.UserSession.created_at.desc()).all()
+    user_map = {user.id: user for user in users}
+    return {
+        "login_activity": [
+            {
+                "user_id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "role": user.role,
+                "last_login": user.last_login,
+            }
+            for user in users
+        ],
+        "active_sessions": [
+            {
+                "id": session.id,
+                "username": user_map.get(session.user_id).username if user_map.get(session.user_id) else "Unknown",
+                "email": user_map.get(session.user_id).email if user_map.get(session.user_id) else "",
+                "started_at": session.created_at,
+                "ip_address": session.ip_address,
+                "user_agent": session.user_agent,
+                "expires_at": session.expires_at,
+            }
+            for session in sessions
+        ],
+    }
 
 
 @router.get("/.well-known/openid-configuration")

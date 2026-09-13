@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useAuthStore } from '../stores';
-import { Settings, Shield, User, FileLock2, AlertCircle, CheckCircle2, Users, Heart, Server, ShieldCheck, Lock, Unlock, Key, Globe, Sparkles, RefreshCw } from 'lucide-react';
+import { Settings, Shield, User, FileLock2, AlertCircle, CheckCircle2, Users, Heart, Server, ShieldCheck, Lock, Unlock, Key, Globe, Sparkles, RefreshCw, Activity as ActivityIcon } from 'lucide-react';
 import { API_BASE } from '../utils/api';
 
 export const SettingsPage: React.FC = () => {
-  const { user } = useAuthStore();
-  const [activeTab, setActiveTab] = useState<'profile' | 'admin' | 'health' | 'gim'>('profile');
+  const { user, logout } = useAuthStore();
+  const [activeTab, setActiveTab] = useState<'profile' | 'admin' | 'health' | 'activity'>('profile');
 
   const [rpcStatus, setRpcStatus] = useState<any>(null);
   const [loadingRpc, setLoadingRpc] = useState(false);
@@ -15,7 +15,7 @@ export const SettingsPage: React.FC = () => {
     try {
       const res = await fetch(`${API_BASE}/api/health/indexer`, {
         headers: {
-          'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
+          ...getAuthHeaders()
         }
       });
       if (res.ok) {
@@ -38,16 +38,63 @@ export const SettingsPage: React.FC = () => {
   // Session tracking state — fetched from backend
   const [sessions, setSessions] = useState<{id: string; device: string; ip: string; browser: string; os: string; lastActive: string; isCurrent: boolean}[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [mfaSecret, setMfaSecret] = useState('');
+  const [mfaUri, setMfaUri] = useState('');
+  const [mfaCode, setMfaCode] = useState('');
+  const [mfaLoading, setMfaLoading] = useState(false);
+  const [mfaMessage, setMfaMessage] = useState('');
+
+  const getAuthHeaders = () => ({
+    Authorization: `Bearer ${sessionStorage.getItem('token') || localStorage.getItem('token') || ''}`
+  });
+
+  const describeUserAgent = (userAgent: string | null | undefined) => {
+    const value = userAgent || 'Unknown device';
+    const browser = /Edg\/?([\d.]+)/i.test(value) ? 'Edge' : /Chrome\/?([\d.]+)/i.test(value) ? 'Chrome' : /Firefox\/?([\d.]+)/i.test(value) ? 'Firefox' : /Safari\/?([\d.]+)/i.test(value) ? 'Safari' : 'Browser';
+    const os = /Windows/i.test(value) ? 'Windows' : /Mac OS/i.test(value) ? 'macOS' : /Android/i.test(value) ? 'Android' : /iPhone|iPad/i.test(value) ? 'iOS' : /Linux/i.test(value) ? 'Linux' : 'Unknown OS';
+    return { browser, os, device: `${browser} on ${os}` };
+  };
+
+  const displayNameForUser = (user: any) => {
+    const source = String(user.name || user.username || user.email || '').toLowerCase();
+    if (source.includes('sinha') || source.includes('aman') || source.includes('amankothari')) return 'Aman Kothari';
+    if (source.includes('verma') || source.includes('aditya') || source.includes('adityakumar')) return 'Aditya Kumar';
+    if (source.includes('gupta') || source.includes('anshul') || source.includes('anshultak')) return 'Anshul Tak';
+    if (source.includes('lakshay') || source.includes('lakshaysoni')) return 'Lakshay Soni';
+    return user.name || user.username || user.email?.split('@')[0] || 'Unknown';
+  };
+
+  const formatIndiaTime = (timestamp: string | null | undefined) => {
+    if (!timestamp) return 'Unknown';
+    const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(timestamp) ? timestamp : `${timestamp}Z`;
+    const date = new Date(normalized);
+    if (Number.isNaN(date.getTime())) return 'Unknown';
+    return new Intl.DateTimeFormat('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      dateStyle: 'short',
+      timeStyle: 'short',
+    }).format(date);
+  };
 
   useEffect(() => {
     (async () => {
       try {
-        const token = sessionStorage.getItem('token') || localStorage.getItem('token') || '';
-        const res = await fetch(`${API_BASE}/api/iam/sessions`, { headers: { Authorization: `Bearer ${token}` } });
+        const res = await fetch(`${API_BASE}/api/auth/sessions`, { headers: getAuthHeaders() });
         if (res.ok) {
           const data = await res.json();
-          if (Array.isArray(data) && data.length > 0) {
-            setSessions(data);
+          if (Array.isArray(data)) {
+            setSessions(data.map((session: any, index: number) => {
+              const details = describeUserAgent(session.user_agent);
+              return {
+                id: session.id,
+                device: details.device,
+                ip: session.ip_address || 'Unknown IP',
+                browser: details.browser,
+                os: details.os,
+                lastActive: formatIndiaTime(session.created_at),
+                isCurrent: index === 0
+              };
+            }));
           }
         }
       } catch { /* API unavailable — show empty state */ }
@@ -55,9 +102,77 @@ export const SettingsPage: React.FC = () => {
     })();
   }, []);
 
-  const handleRevokeSession = (id: string, deviceName: string) => {
-    setSessions(prev => prev.filter(s => s.id !== id));
-    alert(`Session terminated successfully for device: ${deviceName}. Token rotated.`);
+  const handleRevokeSession = async (id: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/sessions/revoke/${encodeURIComponent(id)}`, {
+        method: 'POST',
+        headers: getAuthHeaders()
+      });
+      if (!res.ok) throw new Error('Unable to revoke session');
+      setSessions(prev => prev.filter(s => s.id !== id));
+      if (sessions.find(session => session.id === id)?.isCurrent) {
+        logout();
+        window.location.hash = '#login';
+      }
+    } catch {
+      setMfaMessage('Session revocation failed. Please try again.');
+    }
+  };
+
+  const handleRevokeAllSessions = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/sessions/revoke-all`, {
+        method: 'POST',
+        headers: getAuthHeaders()
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Unable to revoke sessions');
+      setSessions([]);
+      logout();
+      window.location.hash = '#login';
+    } catch (error: any) {
+      setMfaMessage(error.message || 'Session revocation failed. Please try again.');
+    }
+  };
+
+  const isAdministrator = user?.role === 'admin' || user?.role === 'administrator';
+
+  const setupMfa = async () => {
+    setMfaLoading(true);
+    setMfaMessage('');
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/mfa/setup`, { method: 'POST', headers: getAuthHeaders() });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Unable to initialize MFA');
+      setMfaSecret(data.secret);
+      setMfaUri(data.qr_code_uri);
+      setMfaMessage('Add this account to your authenticator app, then enter the generated code to enable MFA.');
+    } catch (error: any) {
+      setMfaMessage(error.message || 'Unable to initialize MFA');
+    } finally {
+      setMfaLoading(false);
+    }
+  };
+
+  const enableMfa = async () => {
+    setMfaLoading(true);
+    setMfaMessage('');
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/mfa/enable`, {
+        method: 'POST',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: mfaCode.trim() })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Invalid authenticator code');
+      useAuthStore.setState((state) => ({ user: state.user ? { ...state.user, mfaEnabled: true } : state.user }));
+      setMfaCode('');
+      setMfaMessage('MFA is enabled. Future sign-ins require a current authenticator code.');
+    } catch (error: any) {
+      setMfaMessage(error.message || 'Unable to enable MFA');
+    } finally {
+      setMfaLoading(false);
+    }
   };
 
   // User Management State — fetched from backend
@@ -72,9 +187,24 @@ export const SettingsPage: React.FC = () => {
         if (res.ok) {
           const data = await res.json();
           if (Array.isArray(data) && data.length > 0) {
+            const currentRecord = data.find((record: any) => record.id === user?.id || record.email === user?.email);
+            if (currentRecord) {
+              useAuthStore.setState((state) => ({
+                user: state.user ? {
+                  ...state.user,
+                  username: currentRecord.username,
+                  email: currentRecord.email,
+                  role: currentRecord.role,
+                  isActive: currentRecord.is_active,
+                  mfaEnabled: currentRecord.mfa_enabled,
+                  department: currentRecord.department,
+                  lastLogin: currentRecord.last_login,
+                } : state.user,
+              }));
+            }
             setUsersList(data.map((u: any) => ({
               id: u.id || u.user_id || `usr-${Math.random().toString(36).slice(2, 6)}`,
-              name: u.name || u.username || u.email?.split('@')[0] || 'Unknown',
+              name: displayNameForUser(u),
               email: u.email || '',
               role: u.role || 'read-only',
               status: u.is_active !== false ? 'Active' : 'Deactivated'
@@ -88,6 +218,49 @@ export const SettingsPage: React.FC = () => {
 
   const [allowedIpRanges, setAllowedIpRanges] = useState('');
   const [sessionTimeout, setSessionTimeout] = useState('60');
+  const [securitySettingsLoading, setSecuritySettingsLoading] = useState(true);
+  const [securitySettingsSaving, setSecuritySettingsSaving] = useState(false);
+  const [showCreateUser, setShowCreateUser] = useState(false);
+  const [newUser, setNewUser] = useState({ username: '', email: '', password: '', role: 'investigator' });
+  const [activity, setActivity] = useState<{ login_activity: any[]; active_sessions: any[] }>({ login_activity: [], active_sessions: [] });
+  const [activityLoading, setActivityLoading] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/auth/security-settings`, { headers: getAuthHeaders() });
+        if (res.ok) {
+          const data = await res.json();
+          setAllowedIpRanges(data.allowed_ip_ranges || '');
+          setSessionTimeout(String(data.session_timeout_minutes || 480));
+        }
+      } finally {
+        setSecuritySettingsLoading(false);
+      }
+    })();
+  }, []);
+
+  const saveSecuritySettings = async () => {
+    setSecuritySettingsSaving(true);
+    setMfaMessage('');
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/security-settings`, {
+        method: 'PUT',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          allowed_ip_ranges: allowedIpRanges,
+          session_timeout_minutes: Number(sessionTimeout),
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Unable to save gateway security settings');
+      setMfaMessage('Gateway ranges and session timeout saved successfully.');
+    } catch (error: any) {
+      setMfaMessage(error.message || 'Unable to save gateway security settings');
+    } finally {
+      setSecuritySettingsSaving(false);
+    }
+  };
 
   const toggleUserStatus = (id: string) => {
     setUsersList(prev => prev.map(u => {
@@ -100,6 +273,44 @@ export const SettingsPage: React.FC = () => {
 
   const updateUserRole = (id: string, role: string) => {
     setUsersList(prev => prev.map(u => u.id === id ? { ...u, role } : u));
+  };
+
+  const displayCurrentUserName = displayNameForUser({ username: user?.username, email: user?.email });
+  const displayCurrentRole = user?.role === 'admin' || user?.role === 'administrator' ? 'Administrator' : (user?.role || 'Unknown');
+
+  const fetchAdminActivity = async () => {
+    setActivityLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/iam/admin/activity`, { headers: getAuthHeaders() });
+      if (res.ok) setActivity(await res.json());
+    } finally {
+      setActivityLoading(false);
+    }
+  };
+
+  const createUser = async (event: React.FormEvent) => {
+    event.preventDefault();
+    try {
+      const res = await fetch(`${API_BASE}/api/iam/users`, {
+        method: 'POST',
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(newUser),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Unable to create user');
+      setUsersList(prev => [...prev, {
+        id: data.id,
+        name: displayNameForUser(data),
+        email: data.email,
+        role: data.role,
+        status: data.is_active ? 'Active' : 'Deactivated',
+      }]);
+      setNewUser({ username: '', email: '', password: '', role: 'investigator' });
+      setShowCreateUser(false);
+      setMfaMessage('User created successfully.');
+    } catch (error: any) {
+      setMfaMessage(error.message || 'Unable to create user');
+    }
   };
 
   return (
@@ -133,13 +344,14 @@ export const SettingsPage: React.FC = () => {
         >
           <Heart size={14} className="inline mr-1.5" /> System Health Logs
         </button>
-        <button
-          onClick={() => setActiveTab('gim')}
-          className={`px-5 py-3 border-b-2 text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${activeTab === 'gim' ? 'border-primary-500 text-white bg-dark-900/30' : 'border-transparent text-dark-400 hover:text-white'
-            }`}
-        >
-          <Globe size={14} className="inline mr-1.5 animate-pulse" /> GIM Federation
-        </button>
+        {isAdministrator && (
+          <button
+            onClick={() => { setActiveTab('activity'); void fetchAdminActivity(); }}
+            className={`px-5 py-3 border-b-2 text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${activeTab === 'activity' ? 'border-primary-500 text-white bg-dark-900/30' : 'border-transparent text-dark-400 hover:text-white'}`}
+          >
+            <ActivityIcon size={14} className="inline mr-1.5" /> Admin Activity
+          </button>
+        )}
       </div>
 
       {/* Tab Workspace Contents */}
@@ -158,7 +370,7 @@ export const SettingsPage: React.FC = () => {
                 <div className="space-y-3 text-xs">
                   <div className="flex flex-col">
                     <span className="text-[10px] text-dark-500 uppercase">Operator Name</span>
-                    <span className="text-xs font-semibold text-white">{user?.username || 'Lakshay Soni'}</span>
+                    <span className="text-xs font-semibold text-white">{displayCurrentUserName}</span>
                   </div>
                   <div className="flex flex-col">
                     <span className="text-[10px] text-dark-500 uppercase">Email Profile</span>
@@ -166,7 +378,7 @@ export const SettingsPage: React.FC = () => {
                   </div>
                   <div className="flex flex-col">
                     <span className="text-[10px] text-dark-500 uppercase">Clearance Role</span>
-                    <span className="text-xs font-bold text-primary-400 capitalize">{user?.role || 'investigator'}</span>
+                    <span className="text-xs font-bold text-primary-400 capitalize">{displayCurrentRole}</span>
                   </div>
                   <div className="flex flex-col">
                     <span className="text-[10px] text-dark-500 uppercase">Cell Unit</span>
@@ -185,23 +397,35 @@ export const SettingsPage: React.FC = () => {
                 <div className="space-y-4 text-xs">
                   <div className="flex items-center justify-between">
                     <span className="text-dark-300">MFA Status</span>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-accent-green/15 border border-accent-green/20 text-accent-green">
-                      TOTP Active
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${user?.mfaEnabled ? 'bg-accent-green/15 border border-accent-green/20 text-accent-green' : 'bg-accent-gold/15 border border-accent-gold/20 text-accent-gold'}`}>
+                      {user?.mfaEnabled ? 'TOTP Active' : 'Not enabled'}
                     </span>
                   </div>
 
-                  <div className="p-3 bg-dark-900/50 border border-dark-800 rounded-lg space-y-2 text-[11px]">
-                    <span className="font-bold text-white block">Authenticator Secret:</span>
-                    <code className="text-primary-300 font-mono block select-all">JBSWY3DPEHPK3PXP</code>
-                    <p className="text-dark-500 text-[10px] leading-snug">Scan this secret key with Google Authenticator or Duo App. Fallback login code: <span className="font-bold text-primary-400 font-mono">123456</span></p>
-                  </div>
+                  {!user?.mfaEnabled && !mfaSecret && (
+                    <button onClick={setupMfa} disabled={mfaLoading} className="btn-primary w-full py-2 text-xs">
+                      {mfaLoading ? 'Preparing authenticator...' : 'Set up authenticator'}
+                    </button>
+                  )}
 
-                  <div className="flex justify-center bg-white p-3 rounded-lg border border-dark-800 w-32 h-32 mx-auto">
-                    <svg className="w-full h-full text-dark-950" viewBox="0 0 29 29" fill="currentColor">
-                      <path d="M0 0h9v9H0zm1 1h7v7H1zm11 0h1v1h-1zm1 1h1v1h-1zm-2 1h1v1h-1zm4-3h9v9h-9zm1 1h7v7h-7zm-11 11h9v9H0zm1 1h7v7H1zm11-1h1v1h-1zm3 0h1v1h-1zm3 0h1v1h-1zm-6 2h1v1h-1zm4 0h1v1h-1zm4 0h1v1h-1zm-7 2h1v1h-1zm3 0h1v1h-1zm3 0h1v1h-1z" />
-                      <path d="M2 2h5v5H2zm17 0h5v5h-5zM2 13h5v5H2z" fill="none" />
-                    </svg>
-                  </div>
+                  {mfaSecret && !user?.mfaEnabled && (
+                    <div className="p-3 bg-dark-900/50 border border-dark-800 rounded-lg space-y-3 text-[11px]">
+                      <div>
+                        <span className="font-bold text-white block">Authenticator secret</span>
+                        <code className="text-primary-300 font-mono block select-all break-all">{mfaSecret}</code>
+                      </div>
+                      <div>
+                        <span className="font-bold text-white block">Provisioning URI</span>
+                        <code className="text-dark-400 font-mono block select-all break-all">{mfaUri}</code>
+                      </div>
+                      <div className="flex gap-2">
+                        <input value={mfaCode} onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" placeholder="6-digit code" className="input-field py-1.5 px-3 flex-1" />
+                        <button onClick={enableMfa} disabled={mfaLoading || mfaCode.length !== 6} className="btn-primary px-3 text-xs">Enable</button>
+                      </div>
+                    </div>
+                  )}
+
+                  {mfaMessage && <p className="text-[10px] text-dark-400 leading-snug">{mfaMessage}</p>}
                 </div>
               </div>
             </div>
@@ -239,7 +463,13 @@ export const SettingsPage: React.FC = () => {
                     <Server size={16} className="text-primary-400" />
                     <h3 className="text-sm font-bold text-white">Active Device Sessions</h3>
                   </div>
-                  <span className="text-[10px] text-dark-500 uppercase font-mono font-bold bg-dark-900 px-2 py-0.5 rounded border border-dark-800">Rotating Tokens</span>
+                  <button
+                    onClick={handleRevokeAllSessions}
+                    disabled={sessions.length === 0}
+                    className="px-2.5 py-1 bg-accent-red/10 border border-accent-red/20 text-accent-red rounded hover:bg-accent-red/20 disabled:opacity-40 disabled:cursor-not-allowed text-[10px] font-bold transition-all"
+                  >
+                    Revoke All Sessions
+                  </button>
                 </div>
 
                 <div className="space-y-3">
@@ -253,11 +483,11 @@ export const SettingsPage: React.FC = () => {
                           )}
                         </div>
                         <p className="text-[10px] text-dark-400">IP: {sess.ip} • Browser: {sess.browser} • OS: {sess.os}</p>
-                        <p className="text-[9px] text-dark-500">Last activity: {sess.lastActive}</p>
+                        <p className="text-[9px] text-dark-500">Session started: {sess.lastActive}</p>
                       </div>
-                      {!sess.isCurrent && (
+                      {isAdministrator && (
                         <button
-                          onClick={() => handleRevokeSession(sess.id, sess.device)}
+                          onClick={() => handleRevokeSession(sess.id)}
                           className="px-2.5 py-1 bg-accent-red/10 border border-accent-red/20 text-accent-red rounded hover:bg-accent-red/20 text-[10px] font-bold transition-all duration-200 self-start sm:self-auto"
                         >
                           Revoke
@@ -280,8 +510,33 @@ export const SettingsPage: React.FC = () => {
                   <Users size={16} className="text-primary-400" />
                   <h3 className="text-sm font-bold text-white">Granular RBAC User Directory</h3>
                 </div>
-                <span className="text-[10px] text-dark-400">Total Users: {usersList.length}</span>
+                  <div className="flex items-center gap-3">
+                    <span className="text-[10px] text-dark-400">Total Users: {usersList.length}</span>
+                    {isAdministrator && (
+                      <button onClick={() => setShowCreateUser(prev => !prev)} className="btn-primary px-2.5 py-1 text-[10px]">
+                        {showCreateUser ? 'Close' : 'Add User'}
+                      </button>
+                    )}
               </div>
+                    </div>
+
+              {showCreateUser && isAdministrator && (
+                <form onSubmit={createUser} className="grid grid-cols-1 md:grid-cols-2 gap-3 p-3 bg-dark-900/50 border border-primary-500/20 rounded-lg">
+                  <input required value={newUser.username} onChange={e => setNewUser({ ...newUser, username: e.target.value })} placeholder="Username" className="input-field py-1.5 px-3" />
+                  <input required type="email" value={newUser.email} onChange={e => setNewUser({ ...newUser, email: e.target.value })} placeholder="Email address" className="input-field py-1.5 px-3" />
+                  <input required minLength={12} type="password" value={newUser.password} onChange={e => setNewUser({ ...newUser, password: e.target.value })} placeholder="Temporary password (12+ characters)" className="input-field py-1.5 px-3" />
+                  <div className="flex gap-2">
+                    <select value={newUser.role} onChange={e => setNewUser({ ...newUser, role: e.target.value })} className="input-field py-1.5 px-3 flex-1">
+                      <option value="investigator">Investigator</option>
+                      <option value="analyst">Analyst</option>
+                      <option value="auditor">Auditor</option>
+                      <option value="supervisor">Supervisor</option>
+                      <option value="admin">Administrator</option>
+                    </select>
+                    <button type="submit" className="btn-primary px-3 text-xs">Create</button>
+                  </div>
+                </form>
+              )}
 
               <div className="overflow-x-auto text-xs">
                 <table className="data-table">
@@ -305,7 +560,7 @@ export const SettingsPage: React.FC = () => {
                             onChange={(e) => updateUserRole(item.id, e.target.value)}
                             className="bg-dark-950 border border-dark-850 rounded px-1.5 py-0.5 text-xs text-white"
                           >
-                            <option value="administrator">Administrator</option>
+                            <option value="admin">Administrator</option>
                             <option value="supervisor">Supervisor</option>
                             <option value="investigator">Investigator</option>
                             <option value="analyst">Analyst</option>
@@ -348,6 +603,7 @@ export const SettingsPage: React.FC = () => {
                     type="number"
                     value={sessionTimeout}
                     onChange={(e) => setSessionTimeout(e.target.value)}
+                    disabled={!isAdministrator || securitySettingsLoading}
                     className="input-field py-1.5 px-3"
                   />
                 </div>
@@ -357,10 +613,21 @@ export const SettingsPage: React.FC = () => {
                     type="text"
                     value={allowedIpRanges}
                     onChange={(e) => setAllowedIpRanges(e.target.value)}
+                    disabled={!isAdministrator || securitySettingsLoading}
                     className="input-field py-1.5 px-3 mono"
+                    placeholder="10.0.0.0/8, 192.168.1.0/24"
                   />
                 </div>
               </div>
+              <div className="flex items-center justify-between gap-3 border-t border-dark-800 pt-3">
+                <p className="text-[10px] text-dark-500">Empty ranges allow all client IPs. Changes apply to future logins.</p>
+                {isAdministrator && (
+                  <button onClick={saveSecuritySettings} disabled={securitySettingsLoading || securitySettingsSaving} className="btn-primary px-3 py-1.5 text-xs">
+                    {securitySettingsSaving ? 'Saving...' : 'Save Security Policy'}
+                  </button>
+                )}
+              </div>
+              {mfaMessage && <p className="text-[10px] text-dark-400">{mfaMessage}</p>}
             </div>
           </div>
         )}
@@ -479,7 +746,36 @@ export const SettingsPage: React.FC = () => {
           </div>
         )}
 
-        {activeTab === 'gim' && (
+        {activeTab === 'activity' && isAdministrator && (
+          <div className="space-y-6 animate-fade-in">
+            <div className="glass-card p-5 border-dark-700/50 space-y-4">
+              <div className="flex items-center justify-between border-b border-dark-800 pb-3">
+                <div className="flex items-center gap-2"><ActivityIcon size={16} className="text-primary-400" /><h3 className="text-sm font-bold text-white">Administrator Activity</h3></div>
+                <button onClick={fetchAdminActivity} disabled={activityLoading} className="text-xs text-primary-400 hover:text-white"><RefreshCw size={12} className={activityLoading ? 'animate-spin inline mr-1' : 'inline mr-1'} />Refresh</button>
+              </div>
+              <div className="space-y-2">
+                <h4 className="text-xs font-bold text-dark-300 uppercase">Last Login Activity</h4>
+                {activity.login_activity.map(item => (
+                  <div key={item.user_id} className="flex items-center justify-between p-2.5 bg-dark-900/50 border border-dark-800 rounded-lg text-xs">
+                    <span className="font-semibold text-white">{displayNameForUser(item)} <span className="text-dark-500">({item.email})</span></span>
+                    <span className="text-dark-400">{item.last_login ? formatIndiaTime(item.last_login) : 'Never logged in'}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="space-y-2">
+                <h4 className="text-xs font-bold text-dark-300 uppercase">Active Sessions</h4>
+                {activity.active_sessions.map(item => (
+                  <div key={item.id} className="p-2.5 bg-dark-900/50 border border-dark-800 rounded-lg text-xs">
+                    <div className="flex justify-between"><span className="font-semibold text-white">{displayNameForUser(item)}</span><span className="text-dark-400">{formatIndiaTime(item.started_at)}</span></div>
+                    <div className="text-dark-500 mt-1">{item.email} • {item.ip_address || 'Unknown IP'}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {false && (
           <div className="space-y-6">
             {/* Connected Federation Nodes */}
             <div className="glass-card p-5 border-dark-700/50 space-y-4">

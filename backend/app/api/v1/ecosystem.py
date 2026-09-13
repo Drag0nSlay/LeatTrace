@@ -462,6 +462,7 @@ def generate_forensic_report(request: ForensicReportRequest, db: Session = Depen
 # --- INDEXER HEALTH ---
 
 @router.get("/health/indexer")
+@router.get("/api/health/indexer")
 def get_indexer_health_status(db: Session = Depends(get_db)):
     """Returns real indexer health status from RPC and database checkpoints."""
     from ...services.blockchain.blockchain_service import BlockchainService

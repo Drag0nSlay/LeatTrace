@@ -7,7 +7,7 @@ Import from app.db.models instead of app.models.
 
 # User & Auth models
 from .user import (
-    User, UserSession, OAuthClient, AuthCode,
+    User, UserSession, UserSecuritySettings, OAuthClient, AuthCode,
     TrustedDevice, RecoveryCode, PasswordHistory,
     APIKey, SecurityPolicy,
 )
@@ -49,7 +49,7 @@ from .blockchain import (
 
 __all__ = [
     # User & Auth
-    "User", "UserSession", "OAuthClient", "AuthCode",
+    "User", "UserSession", "UserSecuritySettings", "OAuthClient", "AuthCode",
     "TrustedDevice", "RecoveryCode", "PasswordHistory",
     "APIKey", "SecurityPolicy",
     # Cases

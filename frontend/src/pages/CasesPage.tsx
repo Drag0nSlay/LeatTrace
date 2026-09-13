@@ -1727,6 +1727,7 @@ export const CasesPage: React.FC = () => {
 
             const handleStageClick = () => {
               if (isStage6) {
+                addAuditEntry('REPORT_REQUESTED', `Report generation opened for case ${selectedCase.case_number}`);
                 setPage('reports');
               } else if (isStage7) {
                 void handleUpdateCaseField('status', isCaseClosed ? 'open' : 'closed');

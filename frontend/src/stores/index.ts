@@ -51,19 +51,12 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     const cleanEmail = email.trim();
     const cleanPassword = _password.trim();
 
-    // Instant Fast-Path for static/Vercel/demo mode
-    const mockUser: User = {
-      id: `usr-${Date.now()}`,
-      email: cleanEmail || 'lakshaysoni@cybercrime.gov.in',
-      username: cleanEmail.split('@')[0] || (isOAuth ? 'oauth_officer' : 'lakshaysoni'),
-      role: "admin",
-      isActive: true,
-      mfaEnabled: true,
-      createdAt: new Date().toISOString()
-    };
+    if (!cleanEmail || !cleanPassword) {
+      return false;
+    }
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 600);
+    const timer = setTimeout(() => controller.abort(), 6000);
 
     try {
       const formData = new URLSearchParams();
@@ -108,34 +101,15 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         sessionStorage.setItem('token', data.access_token);
         sessionStorage.setItem('refresh_token', data.refresh_token);
         sessionStorage.setItem('user', JSON.stringify(loggedUser));
+        set({ user: loggedUser, isAuthenticated: true, mfaPendingUser: null, tempMfaToken: null });
+        return true;
       }
     } catch {
       clearTimeout(timer);
+      return false;
     }
 
-    // Validate credentials for Vercel / offline / static mode
-    if (isOAuth) {
-      set({
-        mfaPendingUser: mockUser,
-        tempMfaToken: "mock-mfa-token-xyz"
-      });
-      return true;
-    }
-
-    // Require EXACT preset email 'lakshaysoni@cybercrime.gov.in' and EXACT password 'SecurePass@2026'
-    const isValidCredential = (
-      cleanEmail.toLowerCase() === 'lakshaysoni@cybercrime.gov.in' &&
-      cleanPassword === 'SecurePass@2026'
-    );
-
-    if (isValidCredential) {
-      set({
-        mfaPendingUser: mockUser,
-        tempMfaToken: "mock-mfa-token-xyz"
-      });
-      return true;
-    }
-
+    clearTimeout(timer);
     return false;
   },
   verifyMFA: async (code: string) => {
@@ -145,26 +119,9 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
 
     if (!pending) return false;
 
-    // Strict validation: OTP must match '123456'
-    if (cleanCode === "123456") {
-      sessionStorage.setItem('token', 'mock-jwt-token-access');
-      sessionStorage.setItem('refresh_token', 'mock-jwt-token-refresh');
-      sessionStorage.setItem('user', JSON.stringify(pending));
-      localStorage.removeItem('token');
-      localStorage.removeItem('user');
-      set({
-        user: pending,
-        isAuthenticated: true,
-        mfaPendingUser: null,
-        tempMfaToken: null
-      });
-      return true;
-    }
-
-    // Backend verification path if real token present
-    if (tempToken && tempToken !== "mock-mfa-token-xyz") {
+    if (tempToken) {
       const mfaController = new AbortController();
-      const mfaTimer = setTimeout(() => mfaController.abort(), 600);
+      const mfaTimer = setTimeout(() => mfaController.abort(), 6000);
 
       try {
         const response = await fetch(`${API_BASE}/api/auth/mfa/verify?temp_token=${tempToken}`, {

@@ -1,6 +1,7 @@
 import uuid
 import datetime
 import hashlib
+import ipaddress
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
@@ -12,6 +13,44 @@ from ...services.intel.siem_exporter import log_security_event
 from ...services.risk.anomaly_detector import detect_login_brute_force
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
+
+
+def user_payload(user: models.User) -> dict:
+    """Return the identity fields consumed by the frontend without exposing password data."""
+    return {
+        "id": user.id,
+        "email": user.email,
+        "username": user.username,
+        "role": user.role,
+        "is_active": user.is_active,
+        "mfa_enabled": user.mfa_enabled,
+        "department": user.department,
+        "created_at": user.created_at,
+        "last_login": user.last_login,
+    }
+
+
+def get_security_settings(db: Session, user_id: str):
+    settings = db.query(models.UserSecuritySettings).filter(
+        models.UserSecuritySettings.user_id == user_id
+    ).first()
+    if settings is None:
+        settings = models.UserSecuritySettings(user_id=user_id)
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return settings
+
+
+def ip_allowed(client_ip: str, ranges: str) -> bool:
+    configured = [item.strip() for item in ranges.split(",") if item.strip()]
+    if not configured:
+        return True
+    try:
+        address = ipaddress.ip_address(client_ip)
+        return any(address in ipaddress.ip_network(item, strict=False) for item in configured)
+    except ValueError:
+        return False
 
 @router.post("/login")
 async def login(
@@ -26,6 +65,11 @@ async def login(
     ).first()
 
     ip_address = request.client.host if request.client else "127.0.0.1"
+
+    if user:
+        security_settings = get_security_settings(db, user.id)
+        if not ip_allowed(ip_address, security_settings.allowed_ip_ranges):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Login blocked: this IP address is outside the allowed gateway ranges")
 
     if not user or not security.verify_password(form_data.password, user.hashed_password):
         # Log to audit trail
@@ -79,7 +123,7 @@ async def login(
         return {
             "requires_mfa": True,
             "temp_token": temp_token,
-            "user": user
+            "user": user_payload(user)
         }
 
     # Generate full access & refresh tokens
@@ -101,7 +145,7 @@ async def login(
         ip_address=ip_address,
         user_agent=user_agent,
         is_active=True,
-        expires_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + datetime.timedelta(days=7)
+        expires_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + datetime.timedelta(minutes=get_security_settings(db, user.id).session_timeout_minutes)
     )
     db.add(new_session)
     
@@ -124,7 +168,7 @@ async def login(
         "access_token": access_token,
         "refresh_token": refresh_token,
         "token_type": "bearer",
-        "user": user
+        "user": user_payload(user)
     }
 
 @router.post("/mfa/setup", response_model=schemas.MFASetupOut)
@@ -141,6 +185,30 @@ def setup_mfa(
         "secret": current_user.mfa_secret,
         "qr_code_uri": totp_uri
     }
+
+@router.post("/mfa/enable")
+def enable_mfa(
+    verify_req: schemas.MFAVerifyRequest,
+    current_user: models.User = Depends(security.get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not current_user.mfa_secret:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Set up MFA before enabling it")
+
+    if not security.verify_totp_code(current_user.mfa_secret, verify_req.code):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid authenticator code")
+
+    current_user.mfa_enabled = True
+    audit_entry = models.AuditLog(
+        id=f"log_{uuid.uuid4().hex[:7]}",
+        user_id=current_user.id,
+        username=current_user.username,
+        action="Enabled MFA via TOTP authenticator",
+        status="success"
+    )
+    db.add(audit_entry)
+    db.commit()
+    return {"status": "enabled", "mfa_enabled": True}
 
 @router.post("/mfa/verify")
 def verify_mfa(
@@ -200,7 +268,7 @@ def verify_mfa(
         ip_address=ip_address,
         user_agent=user_agent,
         is_active=True,
-        expires_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + datetime.timedelta(days=7)
+        expires_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + datetime.timedelta(minutes=get_security_settings(db, user.id).session_timeout_minutes)
     )
     db.add(new_session)
 
@@ -223,7 +291,7 @@ def verify_mfa(
         "access_token": access_token,
         "refresh_token": refresh_token,
         "token_type": "bearer",
-        "user": user
+        "user": user_payload(user)
     }
 
 @router.post("/refresh", response_model=schemas.TokenRefreshResponse)
@@ -274,7 +342,7 @@ def refresh_token(
         ip_address=session.ip_address,
         user_agent=session.user_agent,
         is_active=True,
-        expires_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + datetime.timedelta(days=7)
+        expires_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + datetime.timedelta(minutes=get_security_settings(db, user_id).session_timeout_minutes)
     )
     db.add(new_session)
     db.commit()
@@ -293,8 +361,44 @@ def get_active_sessions(
     sessions = db.query(models.UserSession).filter(
         models.UserSession.user_id == current_user.id,
         models.UserSession.is_active == True
-    ).all()
+    ).order_by(models.UserSession.created_at.desc()).all()
     return sessions
+
+@router.get("/security-settings")
+def read_security_settings(
+    current_user: models.User = Depends(security.get_current_user),
+    db: Session = Depends(get_db)
+):
+    settings = get_security_settings(db, current_user.id)
+    return {
+        "allowed_ip_ranges": settings.allowed_ip_ranges,
+        "session_timeout_minutes": settings.session_timeout_minutes,
+    }
+
+@router.put("/security-settings")
+def update_security_settings(
+    payload: dict,
+    current_user: models.User = Depends(security.get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only administrator accounts can change gateway security settings")
+
+    ranges = str(payload.get("allowed_ip_ranges", "")).strip()
+    timeout = int(payload.get("session_timeout_minutes", 480))
+    if timeout < 5 or timeout > 10080:
+        raise HTTPException(status_code=400, detail="Session timeout must be between 5 minutes and 7 days")
+    for item in [value.strip() for value in ranges.split(",") if value.strip()]:
+        try:
+            ipaddress.ip_network(item, strict=False)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid IP or CIDR range: {item}")
+
+    settings = get_security_settings(db, current_user.id)
+    settings.allowed_ip_ranges = ranges
+    settings.session_timeout_minutes = timeout
+    db.commit()
+    return {"allowed_ip_ranges": ranges, "session_timeout_minutes": timeout}
 
 @router.post("/sessions/revoke/{session_id}")
 def revoke_session(
@@ -327,6 +431,30 @@ def revoke_session(
     db.commit()
 
     return {"detail": "Session revoked successfully"}
+
+@router.post("/sessions/revoke-all")
+def revoke_all_sessions(
+    current_user: models.User = Depends(security.get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only administrator accounts can revoke sessions")
+
+    revoked_count = db.query(models.UserSession).filter(
+        models.UserSession.user_id == current_user.id,
+        models.UserSession.is_active == True
+    ).update({models.UserSession.is_active: False}, synchronize_session=False)
+
+    audit_entry = models.AuditLog(
+        id=f"log_{uuid.uuid4().hex[:7]}",
+        user_id=current_user.id,
+        username=current_user.username,
+        action=f"Revoked all active device sessions ({revoked_count})",
+        status="success"
+    )
+    db.add(audit_entry)
+    db.commit()
+    return {"detail": "All active sessions revoked", "revoked_count": revoked_count}
 
 @router.post("/oauth/{provider}")
 def oauth_login(
@@ -383,7 +511,7 @@ def oauth_login(
         ip_address=ip_address,
         user_agent=user_agent,
         is_active=True,
-        expires_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + datetime.timedelta(days=7)
+        expires_at=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + datetime.timedelta(minutes=get_security_settings(db, user.id).session_timeout_minutes)
     )
     db.add(new_session)
 
@@ -403,7 +531,7 @@ def oauth_login(
         "access_token": access_token,
         "refresh_token": refresh_token,
         "token_type": "bearer",
-        "user": user
+        "user": user_payload(user)
     }
 
 @router.get("/me", response_model=schemas.UserOut)

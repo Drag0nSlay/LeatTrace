@@ -2,9 +2,10 @@ import os
 import datetime
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=True)
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from .db.session import engine, Base, SessionLocal
@@ -23,6 +24,104 @@ from .api.v1 import (
 logger = logging.getLogger("leatrace.main")
 
 BACKGROUND_TASKS_ENABLED = os.getenv("LEATrace_BACKGROUND_TASKS", "true").lower() in {"1", "true", "yes", "on"}
+
+
+def ensure_default_dev_user(db):
+    """Creates the local demo officer if it does not exist and keeps the password aligned with the frontend login flow."""
+    from .core import security
+
+    user = db.query(models.User).filter(models.User.email == "lakshaysoni@cybercrime.gov.in").first()
+    if user is None:
+        user = models.User(
+            id="usr_default_dev_officer",
+            email="lakshaysoni@cybercrime.gov.in",
+            username="lakshaysoni",
+            hashed_password=security.get_password_hash("SecurePass@2026"),
+            role="admin",
+            is_active=True,
+            mfa_enabled=False,
+            department="Cyber Crime Cell",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return user
+
+    if user.username != "lakshaysoni":
+        user.username = "lakshaysoni"
+    if user.role != "admin":
+        user.role = "admin"
+    if user.department is None:
+        user.department = "Cyber Crime Cell"
+    if not user.hashed_password or not security.verify_password("SecurePass@2026", user.hashed_password):
+        user.hashed_password = security.get_password_hash("SecurePass@2026")
+    db.commit()
+    return user
+
+
+def normalize_staff_emails(db):
+    """Keep seeded administration identities aligned with their approved addresses."""
+    email_by_legacy_name = {
+        "sinha": ("supervisor.sinha@cybercrime.gov.in", "amankothari@cybercrime.gov.in"),
+        "verma": ("inspector.verma@cybercrime.gov.in", "adityakumar@cybercrime.gov.in"),
+        "gupta": ("auditor.gupta@cybercrime.gov.in", "anshultak@cybercrime.gov.in"),
+    }
+    for legacy_name, (legacy_email, email) in email_by_legacy_name.items():
+        users = db.query(models.User).filter(
+            (models.User.username.ilike(f"%{legacy_name}%")) |
+            (models.User.email == legacy_email)
+        ).all()
+        for user in users:
+            user.email = email
+    db.commit()
+
+
+def ensure_admin_staff_users(db):
+    """Provision the four local administrator identities used by the development portal."""
+    from .core import security
+
+    staff = [
+        {
+            "id": "usr_admin_lakshay_soni",
+            "email": "lakshaysoni@cybercrime.gov.in",
+            "username": "lakshaysoni",
+            "password": os.getenv("LEATRACE_ADMIN_LAKSHAY_PASSWORD", "SecurePass@2026"),
+            "department": "Cyber Crime Cell",
+        },
+        {
+            "id": "usr_admin_aditya_kumar",
+            "email": "adityakumar@cybercrime.gov.in",
+            "username": "adityakumar",
+            "password": os.getenv("LEATRACE_ADMIN_ADITYA_PASSWORD", "AdityaKumar@2026"),
+            "department": "Cyber Crime Cell",
+        },
+        {
+            "id": "usr_admin_aman_kothari",
+            "email": "amankothari@cybercrime.gov.in",
+            "username": "amankothari",
+            "password": os.getenv("LEATRACE_ADMIN_AMAN_PASSWORD", "AmanKothari@2026"),
+            "department": "Cyber Crime Cell",
+        },
+        {
+            "id": "usr_admin_anshul_tak",
+            "email": "anshultak@cybercrime.gov.in",
+            "username": "anshultak",
+            "password": os.getenv("LEATRACE_ADMIN_ANSHUL_PASSWORD", "AnshulTak@2026"),
+            "department": "Cyber Crime Cell",
+        },
+    ]
+
+    for item in staff:
+        user = db.query(models.User).filter(models.User.email == item["email"]).first()
+        if user is None:
+            user = models.User(id=item["id"], email=item["email"])
+            db.add(user)
+        user.username = item["username"]
+        user.hashed_password = security.get_password_hash(item["password"])
+        user.role = "admin"
+        user.is_active = True
+        user.department = item["department"]
+    db.commit()
 
 
 @asynccontextmanager
@@ -48,6 +147,9 @@ async def lifespan(app: FastAPI):
     # Bootstrap default OAuth client from env vars
     db = SessionLocal()
     try:
+        ensure_default_dev_user(db)
+        normalize_staff_emails(db)
+        ensure_admin_staff_users(db)
         oauth_server.bootstrap_default_client(db=db)
         oauth_server.cleanup_expired_codes(db=db)
         logger.info("OAuth bootstrap complete")
@@ -61,11 +163,12 @@ async def lifespan(app: FastAPI):
     logger.info("Threat Intelligence providers registered")
 
 
+    background_tasks = []
     if BACKGROUND_TASKS_ENABLED:
         logger.info("Background tasks enabled. Starting blockchain listener...")
-        asyncio.create_task(real_blockchain_listener())
+        background_tasks.append(asyncio.create_task(real_blockchain_listener()))
         from .services.blockchain.indexer import run_multi_chain_indexer
-        asyncio.create_task(run_multi_chain_indexer())
+        background_tasks.append(asyncio.create_task(run_multi_chain_indexer()))
 
         # Start sanctions background scheduler
         from .services.sanctions.scheduler import sanctions_scheduler
@@ -78,6 +181,9 @@ async def lifespan(app: FastAPI):
     if BACKGROUND_TASKS_ENABLED:
         from .services.sanctions.scheduler import sanctions_scheduler
         await sanctions_scheduler.stop()
+        for task in background_tasks:
+            task.cancel()
+        await asyncio.gather(*background_tasks, return_exceptions=True)
 
     # Shutdown: close connection pools
     logger.info("Application shutting down. Closing connections...")
@@ -104,6 +210,8 @@ app.add_middleware(
         "http://127.0.0.1:5174",
         "http://localhost:5175",
         "http://127.0.0.1:5175",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
         "https://leattrace.vercel.app"
     ],
     allow_credentials=True,

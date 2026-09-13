@@ -3,6 +3,7 @@ import json
 import urllib.request
 import datetime
 import time
+import threading
 from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from ...db.session import SessionLocal
@@ -12,6 +13,7 @@ try:
     import websockets
     WEBSOCKETS_AVAILABLE = True
 except ImportError:
+    websockets = None
     WEBSOCKETS_AVAILABLE = False
 
 RPC_PROVIDERS = {
@@ -39,6 +41,7 @@ class BlockchainIndexer:
         self.active_provider_idx = {chain: 0 for chain in RPC_PROVIDERS.keys()}
         self.circuit_breakers = {chain: {"failures": 0, "last_failure": None} for chain in RPC_PROVIDERS.keys()}
         self.websocket_active = {chain: False for chain in RPC_PROVIDERS.keys()}
+        self.sync_locks = {chain: threading.Lock() for chain in RPC_PROVIDERS.keys()}
 
     def _get_active_rpc(self, chain: str) -> str:
         providers = RPC_PROVIDERS.get(chain, ["https://cloudflare-eth.com"])
@@ -85,6 +88,15 @@ class BlockchainIndexer:
         return self._rpc_request(chain, "eth_getBlockByNumber", [block_hex, True])
 
     def index_chain_incrementally(self, chain: str, target_block: Optional[int] = None):
+        lock = self.sync_locks.setdefault(chain, threading.Lock())
+        if not lock.acquire(blocking=False):
+            return
+        try:
+            self._index_chain_incrementally(chain, target_block)
+        finally:
+            lock.release()
+
+    def _index_chain_incrementally(self, chain: str, target_block: Optional[int] = None):
         """Indexes blocks incrementally up to target block height."""
         db: Session = SessionLocal()
         try:
@@ -104,8 +116,9 @@ class BlockchainIndexer:
                 db.add(checkpoint)
                 db.commit()
             
-            current_block = checkpoint.block_number + 1
-            max_sync_per_loop = min(current_block + 5, latest_head + 1)
+            checkpoint_block: int = int(getattr(checkpoint, "block_number"))
+            current_block: int = checkpoint_block + 1
+            max_sync_per_loop: int = min(current_block + 5, latest_head + 1)
             
             while current_block < max_sync_per_loop:
                 if current_block > latest_head:
@@ -120,12 +133,25 @@ class BlockchainIndexer:
                 if not block_data:
                     break
                 
+                transactions = block_data.get("transactions", [])
+                tx_hashes = [tx.get("hash") for tx in transactions if tx.get("hash")]
+
+                if tx_hashes:
+                    db.query(models.IndexedTokenTransfer).filter(
+                        models.IndexedTokenTransfer.chain == chain,
+                        models.IndexedTokenTransfer.tx_hash.in_(tx_hashes),
+                    ).delete(synchronize_session=False)
+
                 db.query(models.IndexedTransaction).filter(
                     models.IndexedTransaction.chain == chain,
-                    models.IndexedTransaction.block_number == current_block
+                    (
+                        (models.IndexedTransaction.block_number == current_block)
+                        | models.IndexedTransaction.tx_hash.in_(tx_hashes)
+                    ) if tx_hashes else (
+                        models.IndexedTransaction.block_number == current_block
+                    )
                 ).delete()
-                
-                transactions = block_data.get("transactions", [])
+
                 timestamp_sec = int(block_data.get("timestamp", "0x0"), 16)
                 block_time = datetime.datetime.utcfromtimestamp(timestamp_sec)
                 
@@ -172,7 +198,7 @@ class BlockchainIndexer:
                         except Exception:
                             pass
                 
-                checkpoint.block_number = current_block
+                setattr(checkpoint, "block_number", current_block)
                 db.commit()
                 block_cache.add(cache_key)
                 
@@ -182,6 +208,7 @@ class BlockchainIndexer:
                 current_block += 1
                 
         except Exception as e:
+            db.rollback()
             print(f"[INDEXER] Sync loop error for {chain}: {e}")
         finally:
             db.close()
@@ -190,7 +217,7 @@ indexer = BlockchainIndexer()
 
 async def listen_blockchain_websocket(chain: str):
     """Subscribes to block headers via WebSocket. Fallback triggers polling on connection drops."""
-    if not WEBSOCKETS_AVAILABLE:
+    if not WEBSOCKETS_AVAILABLE or websockets is None:
         print(f"[INDEXER] WSS unavailable for {chain}. Running HTTP Polling fallback.")
         return
 
@@ -198,11 +225,18 @@ async def listen_blockchain_websocket(chain: str):
     if not wss_url:
         return
 
+    retry_delay = 10
     while True:
         try:
             print(f"[INDEXER] Connecting WSS block subscriber to {chain} node...")
-            async with websockets.connect(wss_url, ping_interval=20, ping_timeout=10) as ws:
+            async with websockets.connect(
+                wss_url,
+                ping_interval=20,
+                ping_timeout=30,
+                close_timeout=10,
+            ) as ws:
                 indexer.websocket_active[chain] = True
+                retry_delay = 10
                 
                 # Send subscribe subscription payload
                 sub_payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_subscribe", "params": ["newHeads"]}
@@ -226,8 +260,9 @@ async def listen_blockchain_websocket(chain: str):
                         
         except Exception as e:
             indexer.websocket_active[chain] = False
-            print(f"[INDEXER] WSS subscription dropped for {chain}: {e}. Retrying in 10s...")
-            await asyncio.sleep(10)
+            print(f"[INDEXER] WSS subscription dropped for {chain}: {e}. Retrying in {retry_delay}s...")
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)
 
 async def run_multi_chain_indexer():
     """Background parallel sync worker running constantly inside FastAPI lifecycle."""

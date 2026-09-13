@@ -561,6 +561,44 @@ ${counterparties.map((cp, idx) => {
     setTimeout(() => setDownloadSuccessToast(null), 3000);
   };
 
+  const handlePrintReport = (report: GeneratedReport) => {
+    const printWindow = window.open('', '_blank', 'noopener,noreferrer,width=1100,height=850');
+    if (!printWindow) {
+      setDownloadSuccessToast('Allow pop-ups to print the standalone report');
+      setTimeout(() => setDownloadSuccessToast(null), 3000);
+      return;
+    }
+
+    printWindow.document.open();
+    printWindow.document.write(report.htmlContent);
+    printWindow.document.close();
+    printWindow.addEventListener('load', () => {
+      printWindow.focus();
+      printWindow.print();
+    }, { once: true });
+  };
+
+  const handlePrintLiveReport = () => {
+    const now = new Date();
+    const liveReport: GeneratedReport = {
+      id: `LIVE-${Date.now()}`,
+      title: 'Live Investigation Report',
+      type: 'full',
+      generatedAt: now.toISOString(),
+      targetAddress: activeTargetAddress,
+      caseId: investigationId,
+      riskScore,
+      riskLevel,
+      hashSeal: liveStateSeal,
+      fileSize: 'Live',
+      summaryText: 'Live investigation report',
+      textContent: fullLiveReportText,
+      jsonContent: {},
+      htmlContent: buildStandaloneHtml('Live Investigation Report', 'full', liveStateSeal, fullLiveReportText),
+    };
+    handlePrintReport(liveReport);
+  };
+
   const handleCopyModalText = (text: string) => {
     void navigator.clipboard.writeText(text);
     setCopiedModal(true);
@@ -871,7 +909,7 @@ ${counterparties.map((cp, idx) => {
             </button>
 
             <button
-              onClick={() => window.print()}
+              onClick={handlePrintLiveReport}
               className="px-3 py-1.5 rounded-lg text-xs font-bold bg-dark-800 text-dark-200 border border-dark-700 hover:border-primary-500/40 hover:text-white transition-all flex items-center gap-1.5"
             >
               <Printer size={12} /> Print
@@ -1544,7 +1582,7 @@ ${counterparties.map((cp, idx) => {
                   {copiedModal ? <><CheckCircle2 size={13} className="text-emerald-400" /> Copied!</> : <><Copy size={13} /> Copy Text</>}
                 </button>
                 <button
-                  onClick={() => window.print()}
+                  onClick={() => handlePrintReport(activeModalReport)}
                   className="px-3 py-2 rounded-lg text-xs font-bold bg-dark-800 text-dark-200 hover:text-white border border-dark-700 hover:border-dark-600 transition-all flex items-center gap-1.5"
                 >
                   <Printer size={13} /> Print / PDF

@@ -43,6 +43,28 @@ class TestThreatFeedSchedulerConfigured:
             assert "OFAC_SDN" in result["providers"]
 
 
+class TestDefaultOfficerBootstrap:
+    def test_default_officer_account_is_created_when_missing(self):
+        from app.db.session import SessionLocal
+        from app.db import models
+        from app.core import security
+        from app.main import ensure_default_dev_user
+
+        db = SessionLocal()
+        try:
+            db.query(models.User).filter(models.User.email == "lakshaysoni@cybercrime.gov.in").delete()
+            db.commit()
+
+            user = ensure_default_dev_user(db)
+
+            assert user.email == "lakshaysoni@cybercrime.gov.in"
+            assert user.username == "lakshaysoni"
+            assert user.role == "admin"
+            assert security.verify_password("SecurePass@2026", user.hashed_password) is True
+        finally:
+            db.close()
+
+
 class TestSecretHashing:
     def test_hash_not_plaintext(self):
         secret = "my-very-secret-key"

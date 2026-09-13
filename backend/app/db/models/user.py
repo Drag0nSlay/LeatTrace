@@ -38,6 +38,15 @@ class UserSession(Base):
     expires_at = Column(DateTime, nullable=False)
 
 
+class UserSecuritySettings(Base):
+    __tablename__ = "user_security_settings"
+
+    user_id = Column(String, ForeignKey("users.id"), primary_key=True)
+    allowed_ip_ranges = Column(Text, nullable=False, default="")
+    session_timeout_minutes = Column(Integer, nullable=False, default=480)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+
 class OAuthClient(Base):
     __tablename__ = "oauth_clients"
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
