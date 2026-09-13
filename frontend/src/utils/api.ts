@@ -10,7 +10,8 @@
  */
 
 // Reads VITE_API_URL from environment, falls back to localhost for local dev
-export const API_BASE = (import.meta.env.VITE_API_URL as string) || 'http://localhost:8000';
+const envUrl = import.meta.env.VITE_API_URL;
+export const API_BASE = envUrl !== undefined && envUrl !== "" ? envUrl : 'http://localhost:8000';
 
 // WebSocket URL derived from API_BASE (http→ws, https→wss)
 export const WS_BASE = API_BASE.replace(/^http/, 'ws');
